@@ -1443,11 +1443,17 @@
       // Block saving when the L3 virtual network is enabled but a client
       // has a non-empty flow (xtls-rprx-vision is incompatible with the
       // forked xray-core's TUN-based virtualnet path). Returns true on OK.
-      validateVirtualNetwork(inbound, modal) {
-        if (inbound.protocol !== Protocols.VLESS) return true;
+      // candidateClients overrides the inbound's own client list — used by
+      // addClient / updateClient where the new client(s) live in the
+      // client modal, not yet on the inbound.
+      validateVirtualNetwork(inbound, modal, candidateClients) {
+        if (!inbound || inbound.protocol !== Protocols.VLESS) return true;
         const vnet = inbound.settings && inbound.settings.virtualNetwork;
         if (!vnet || !vnet.enabled) return true;
-        const badClient = (inbound.settings.vlesses || []).find(c => c.flow && c.flow !== '');
+        const list = Array.isArray(candidateClients)
+          ? candidateClients
+          : (inbound.settings.vlesses || []);
+        const badClient = list.find(c => c && c.flow && c.flow !== '');
         if (badClient) {
           app.$message.error('Virtual Network requires empty flow on every client (incompatible with xtls-rprx-vision). Clear flow on "' + (badClient.email || badClient.id) + '" or disable Virtual Network.');
           if (modal) modal.loading(false);
@@ -1565,6 +1571,13 @@
         }
       },
       async addClient(clients, dbInboundId, modal) {
+        // Block adding a VLESS client with a non-empty flow when the
+        // parent inbound has the L3 virtual network enabled — this is
+        // the same constraint enforced on the inbound modal save path.
+        const parentDb = this.dbInbounds.find(row => row.id === dbInboundId);
+        const parentInbound = parentDb ? parentDb.toInbound() : null;
+        const list = Array.isArray(clients) ? clients : [clients];
+        if (!this.validateVirtualNetwork(parentInbound, modal, list)) return;
         const data = {
           id: dbInboundId,
           settings: '{"clients": [' + clients.toString() + ']}',
@@ -1572,6 +1585,9 @@
         await this.submit(`/panel/api/inbounds/addClient`, data, modal);
       },
       async updateClient(client, dbInboundId, clientId) {
+        const parentDb = this.dbInbounds.find(row => row.id === dbInboundId);
+        const parentInbound = parentDb ? parentDb.toInbound() : null;
+        if (!this.validateVirtualNetwork(parentInbound, clientModal, [client])) return;
         const data = {
           id: dbInboundId,
           settings: '{"clients": [' + client.toString() + ']}',
