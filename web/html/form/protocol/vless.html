@@ -48,6 +48,45 @@
     </a-form>
     <a-divider :style="{ margin: '5px 0' }"></a-divider>
     </template>
+
+    <!-- Virtual Network (L3) — forked xray-core feature.
+         Adds a TUN-backed virtual subnet so each VLESS client gets a
+         persistent virtual IP and can reach other clients / route all
+         traffic through the server. Only valid with empty flow. -->
+    <a-collapse>
+      <a-collapse-panel header="Virtual Network (L3)">
+        <a-form :colon="false" :label-col="{ md: {span:8} }" :wrapper-col="{ md: {span:14} }">
+          <a-form-item label="Enable Virtual Network">
+            <a-switch v-model="inbound.settings.virtualNetwork.enabled"></a-switch>
+          </a-form-item>
+          <template v-if="inbound.settings.virtualNetwork.enabled">
+            <a-form-item label="Subnet">
+              <a-input v-model.trim="inbound.settings.virtualNetwork.subnet" placeholder="10.0.0.0/24"></a-input>
+            </a-form-item>
+            <a-form-item label="Persist IP Mapping">
+              <a-switch v-model="inbound.settings.virtualNetwork.persistMapping"></a-switch>
+            </a-form-item>
+            <a-form-item label=" ">
+              <a-alert
+                type="warning"
+                show-icon
+                message='flow must be empty — incompatible with xtls-rprx-vision'>
+              </a-alert>
+            </a-form-item>
+            <a-form-item
+              label=" "
+              v-if="inbound.settings.vlesses && inbound.settings.vlesses.some(c => c.flow && c.flow !== '')">
+              <a-alert
+                type="error"
+                show-icon
+                message='At least one client has a non-empty flow. Saving will be blocked until flow is cleared.'>
+              </a-alert>
+            </a-form-item>
+          </template>
+        </a-form>
+      </a-collapse-panel>
+    </a-collapse>
+    <a-divider :style="{ margin: '5px 0' }"></a-divider>
     <template v-if="inbound.isTcp && !inbound.settings.selectedAuth">
       <a-form :colon="false" :label-col="{ md: {span:8} }" :wrapper-col="{ md: {span:14} }">
         <a-form-item label="Fallbacks">
