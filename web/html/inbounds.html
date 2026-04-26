@@ -1552,9 +1552,10 @@
           dbInbound: dbInbound,
           index: index,
           confirm: async (client, dbInboundId, clientId) => {
-            clientModal.loading();
+            // Don't unconditionally close: updateClient may early-return
+            // (e.g. virtualNetwork-vs-flow validation), and HttpUtil
+            // .postWithModal already closes the modal on success.
             await this.updateClient(client, dbInboundId, clientId);
-            clientModal.close();
           },
           isEdit: true
         });
