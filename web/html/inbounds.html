@@ -1440,7 +1440,23 @@
           isEdit: true
         });
       },
+      // Block saving when the L3 virtual network is enabled but a client
+      // has a non-empty flow (xtls-rprx-vision is incompatible with the
+      // forked xray-core's TUN-based virtualnet path). Returns true on OK.
+      validateVirtualNetwork(inbound, modal) {
+        if (inbound.protocol !== Protocols.VLESS) return true;
+        const vnet = inbound.settings && inbound.settings.virtualNetwork;
+        if (!vnet || !vnet.enabled) return true;
+        const badClient = (inbound.settings.vlesses || []).find(c => c.flow && c.flow !== '');
+        if (badClient) {
+          app.$message.error('Virtual Network requires empty flow on every client (incompatible with xtls-rprx-vision). Clear flow on "' + (badClient.email || badClient.id) + '" or disable Virtual Network.');
+          if (modal) modal.loading(false);
+          return false;
+        }
+        return true;
+      },
       async addInbound(inbound, dbInbound) {
+        if (!this.validateVirtualNetwork(inbound, inModal)) return;
         const data = {
           up: dbInbound.up,
           down: dbInbound.down,
@@ -1466,6 +1482,7 @@
         await this.submit('/panel/api/inbounds/add', data, inModal);
       },
       async updateInbound(inbound, dbInbound) {
+        if (!this.validateVirtualNetwork(inbound, inModal)) return;
         const data = {
           up: dbInbound.up,
           down: dbInbound.down,

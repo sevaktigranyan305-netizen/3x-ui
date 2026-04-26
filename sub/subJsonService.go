@@ -363,6 +363,25 @@ func (s *SubJsonService) genVless(inbound *model.Inbound, streamSettings json_ut
 	outbound.Settings = map[string]any{
 		"vnext": []any{vnext},
 	}
+
+	// Forked xray-core feature: when the inbound has the L3 virtual
+	// network enabled, mirror it onto the client outbound so the client
+	// brings up its TUN interface against the same subnet. defaultRoute
+	// is forced to true so all traffic goes through the tunnel — matches
+	// the example in the xray-core fork README.
+	if vnetRaw, ok := inboundSettings["virtualNetwork"].(map[string]any); ok {
+		if enabled, _ := vnetRaw["enabled"].(bool); enabled {
+			vnetOut := map[string]any{
+				"enabled":      true,
+				"defaultRoute": true,
+			}
+			if subnet, ok := vnetRaw["subnet"].(string); ok && subnet != "" {
+				vnetOut["subnet"] = subnet
+			}
+			outbound.VirtualNetwork = vnetOut
+		}
+	}
+
 	result, _ := json.MarshalIndent(outbound, "", "  ")
 	return result
 }
@@ -455,6 +474,11 @@ type Outbound struct {
 	StreamSettings json_util.RawMessage `json:"streamSettings"`
 	Mux            json_util.RawMessage `json:"mux,omitempty"`
 	Settings       map[string]any       `json:"settings,omitempty"`
+	// VirtualNetwork is the client-side L3 virtual network block consumed
+	// by the forked xray-core (sevaktigranyan305-netizen/Xray-core). It is
+	// only populated for VLESS outbounds when the matching inbound has
+	// virtualNetwork.enabled = true.
+	VirtualNetwork map[string]any `json:"virtualNetwork,omitempty"`
 }
 
 type VnextSetting struct {

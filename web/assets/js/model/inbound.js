@@ -1700,6 +1700,21 @@ class Inbound extends XrayCommonClass {
             params.set("security", "none");
         }
 
+        // Forked xray-core feature: when the inbound has the L3 virtual
+        // network enabled, advertise it on the client link so the client
+        // outbound brings up its TUN interface and routes traffic through
+        // it (subnet must match the server inbound).
+        const vnet = this.settings && this.settings.virtualNetwork;
+        if (vnet && vnet.enabled) {
+            params.set("vnet", "1");
+            if (vnet.subnet) {
+                params.set("vnetSubnet", vnet.subnet);
+            }
+            // The exported client config always defaults the route through the
+            // tunnel (matches the example in the xray-core fork README).
+            params.set("vnetDefaultRoute", "1");
+        }
+
         const link = `vless://${uuid}@${address}:${port}`;
         const url = new URL(link);
         for (const [key, value] of params) {
@@ -2283,6 +2298,10 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
         fallbacks = [],
         selectedAuth = undefined,
         testseed = [900, 500, 900, 256],
+        // L3 virtual network feature provided by the forked xray-core
+        // (sevaktigranyan305-netizen/Xray-core). Only meaningful for VLESS
+        // inbounds with empty flow — incompatible with xtls-rprx-vision.
+        virtualNetwork = new Inbound.VLESSSettings.VirtualNetwork(),
     ) {
         super(protocol);
         this.vlesses = vlesses;
@@ -2291,6 +2310,7 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
         this.fallbacks = fallbacks;
         this.selectedAuth = selectedAuth;
         this.testseed = testseed;
+        this.virtualNetwork = virtualNetwork;
     }
 
     addFallback() {
@@ -2315,7 +2335,8 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
             json.encryption,
             Inbound.VLESSSettings.Fallback.fromJson(json.fallbacks || []),
             json.selectedAuth,
-            testseed
+            testseed,
+            Inbound.VLESSSettings.VirtualNetwork.fromJson(json.virtualNetwork)
         );
         return obj;
     }
@@ -2347,7 +2368,44 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
             json.testseed = this.testseed;
         }
 
+        if (this.virtualNetwork && this.virtualNetwork.enabled) {
+            json.virtualNetwork = this.virtualNetwork.toJson();
+        }
+
         return json;
+    }
+};
+
+// L3 virtual network block embedded in the VLESS inbound settings JSON. Read
+// by the forked xray-core. Defaults match the fork (subnet 10.0.0.0/24,
+// persistMapping true, disabled by default).
+Inbound.VLESSSettings.VirtualNetwork = class extends XrayCommonClass {
+    constructor(
+        enabled = false,
+        subnet = '10.0.0.0/24',
+        persistMapping = true,
+    ) {
+        super();
+        this.enabled = enabled;
+        this.subnet = subnet;
+        this.persistMapping = persistMapping;
+    }
+
+    static fromJson(json = {}) {
+        if (!json) json = {};
+        return new Inbound.VLESSSettings.VirtualNetwork(
+            !!json.enabled,
+            typeof json.subnet === 'string' && json.subnet.length > 0 ? json.subnet : '10.0.0.0/24',
+            json.persistMapping !== undefined ? !!json.persistMapping : true,
+        );
+    }
+
+    toJson() {
+        return {
+            enabled: !!this.enabled,
+            subnet: this.subnet,
+            persistMapping: !!this.persistMapping,
+        };
     }
 };
 
