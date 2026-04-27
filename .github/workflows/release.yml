@@ -125,37 +125,17 @@ jobs:
           mkdir x-ui/bin
           cd x-ui/bin
 
-          # Download dependencies
-          Xray_URL="https://github.com/XTLS/Xray-core/releases/download/v26.4.25/"
-          if [ "${{ matrix.platform }}" == "amd64" ]; then
-            wget -q ${Xray_URL}Xray-linux-64.zip
-            unzip Xray-linux-64.zip
-            rm -f Xray-linux-64.zip
-          elif [ "${{ matrix.platform }}" == "arm64" ]; then
-            wget -q ${Xray_URL}Xray-linux-arm64-v8a.zip
-            unzip Xray-linux-arm64-v8a.zip
-            rm -f Xray-linux-arm64-v8a.zip
-          elif [ "${{ matrix.platform }}" == "armv7" ]; then
-            wget -q ${Xray_URL}Xray-linux-arm32-v7a.zip
-            unzip Xray-linux-arm32-v7a.zip
-            rm -f Xray-linux-arm32-v7a.zip
-          elif [ "${{ matrix.platform }}" == "armv6" ]; then
-            wget -q ${Xray_URL}Xray-linux-arm32-v6.zip
-            unzip Xray-linux-arm32-v6.zip
-            rm -f Xray-linux-arm32-v6.zip
-          elif [ "${{ matrix.platform }}" == "386" ]; then
-            wget -q ${Xray_URL}Xray-linux-32.zip
-            unzip Xray-linux-32.zip
-            rm -f Xray-linux-32.zip
-          elif [ "${{ matrix.platform }}" == "armv5" ]; then
-            wget -q ${Xray_URL}Xray-linux-arm32-v5.zip
-            unzip Xray-linux-arm32-v5.zip
-            rm -f Xray-linux-arm32-v5.zip
-          elif [ "${{ matrix.platform }}" == "s390x" ]; then
-            wget -q ${Xray_URL}Xray-linux-s390x.zip
-            unzip Xray-linux-s390x.zip
-            rm -f Xray-linux-s390x.zip
-          fi
+          # Download dependencies from the fork. Asset naming is the
+          # fork's lowercase xray-<os>-<arch>.zip scheme — matrix.platform
+          # values (amd64/arm64/armv7/armv6/armv5/386/s390x) plug straight
+          # into the filename. /releases/latest/download/<asset> redirects
+          # to whatever the fork has marked as the latest release, so no
+          # version pin is needed.
+          Xray_URL="https://github.com/sevaktigranyan305-netizen/Xray-core/releases/latest/download/"
+          Xray_ZIP="xray-linux-${{ matrix.platform }}.zip"
+          wget -q "${Xray_URL}${Xray_ZIP}"
+          unzip "${Xray_ZIP}"
+          rm -f "${Xray_ZIP}"
           rm -f geoip.dat geosite.dat
           wget -q https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
           wget -q https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
@@ -243,11 +223,12 @@ jobs:
           mkdir x-ui\bin
           cd x-ui\bin
 
-          # Download Xray for Windows
-          $Xray_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.4.25/"
-          Invoke-WebRequest -Uri "${Xray_URL}Xray-windows-64.zip" -OutFile "Xray-windows-64.zip"
-          Expand-Archive -Path "Xray-windows-64.zip" -DestinationPath .
-          Remove-Item "Xray-windows-64.zip"
+          # Download Xray for Windows from the fork's latest release.
+          # Fork uses lowercase xray-<os>-<arch>.zip naming.
+          $Xray_URL = "https://github.com/sevaktigranyan305-netizen/Xray-core/releases/latest/download/"
+          Invoke-WebRequest -Uri "${Xray_URL}xray-windows-amd64.zip" -OutFile "xray-windows-amd64.zip"
+          Expand-Archive -Path "xray-windows-amd64.zip" -DestinationPath .
+          Remove-Item "xray-windows-amd64.zip"
           Remove-Item geoip.dat, geosite.dat -ErrorAction SilentlyContinue
           Invoke-WebRequest -Uri "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -OutFile "geoip.dat"
           Invoke-WebRequest -Uri "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -OutFile "geosite.dat"
