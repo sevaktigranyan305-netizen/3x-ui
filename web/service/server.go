@@ -600,31 +600,18 @@ func (s *ServerService) downloadXRay(version string) (string, error) {
 	osName := runtime.GOOS
 	arch := runtime.GOARCH
 
-	switch osName {
-	case "darwin":
-		osName = "macos"
-	case "windows":
-		osName = "windows"
+	// The fork publishes assets as xray-<goos>-<goarch>.zip (lowercase),
+	// matching Go's runtime.GOOS / runtime.GOARCH values directly.
+	// runtime.GOARCH is "arm" for every 32-bit ARM variant; the fork
+	// suffixes those zips with the GOARM variant (armv5/armv6/armv7),
+	// so default to armv7 here (most common modern target). The pre-fork
+	// switch had unreachable cases for "armv7"/"armv6"/"armv5" since
+	// runtime.GOARCH never returns those — same limitation carries over.
+	if arch == "arm" {
+		arch = "armv7"
 	}
 
-	switch arch {
-	case "amd64":
-		arch = "64"
-	case "arm64":
-		arch = "arm64-v8a"
-	case "armv7":
-		arch = "arm32-v7a"
-	case "armv6":
-		arch = "arm32-v6"
-	case "armv5":
-		arch = "arm32-v5"
-	case "386":
-		arch = "32"
-	case "s390x":
-		arch = "s390x"
-	}
-
-	fileName := fmt.Sprintf("Xray-%s-%s.zip", osName, arch)
+	fileName := fmt.Sprintf("xray-%s-%s.zip", osName, arch)
 	// Download source redirected to the fork (see GetXrayVersions).
 	url := fmt.Sprintf("https://github.com/sevaktigranyan305-netizen/Xray-core/releases/download/%s/%s", version, fileName)
 	resp, err := http.Get(url)

@@ -1,35 +1,39 @@
 #!/bin/sh
+# ARCH = the fork's lowercase asset arch suffix (xray-linux-<ARCH>.zip)
+# FNAME = the local rename target the panel image bundles in build/bin
 case $1 in
     amd64)
-        ARCH="64"
+        ARCH="amd64"
         FNAME="amd64"
         ;;
     i386)
-        ARCH="32"
+        ARCH="386"
         FNAME="i386"
         ;;
     armv8 | arm64 | aarch64)
-        ARCH="arm64-v8a"
+        ARCH="arm64"
         FNAME="arm64"
         ;;
     armv7 | arm | arm32)
-        ARCH="arm32-v7a"
+        ARCH="armv7"
         FNAME="arm32"
         ;;
     armv6)
-        ARCH="arm32-v6"
+        ARCH="armv6"
         FNAME="armv6"
         ;;
     *)
-        ARCH="64"
+        ARCH="amd64"
         FNAME="amd64"
         ;;
 esac
 mkdir -p build/bin
 cd build/bin
-curl -sfLRO "https://github.com/sevaktigranyan305-netizen/Xray-core/releases/download/v26.4.25/Xray-linux-${ARCH}.zip"
-unzip "Xray-linux-${ARCH}.zip"
-rm -f "Xray-linux-${ARCH}.zip" geoip.dat geosite.dat
+# /releases/latest/download/<asset> redirects to the most recent published
+# release on the fork, so no version pin is needed.
+curl -sfLRO "https://github.com/sevaktigranyan305-netizen/Xray-core/releases/latest/download/xray-linux-${ARCH}.zip"
+unzip "xray-linux-${ARCH}.zip"
+rm -f "xray-linux-${ARCH}.zip" geoip.dat geosite.dat
 mv xray "xray-linux-${FNAME}"
 curl -sfLRO https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
 curl -sfLRO https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
