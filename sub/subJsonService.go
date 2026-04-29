@@ -99,13 +99,14 @@ func (s *SubJsonService) GetJson(subId string, host string) (string, string, err
 
 	// Prepare Inbounds
 	for _, inbound := range inbounds {
-		clients, err := s.inboundService.GetClients(inbound)
+		rawClients, err := s.inboundService.GetClients(inbound)
 		if err != nil {
 			logger.Error("SubJsonService - GetClients: Unable to get clients from inbound")
 		}
-		if clients == nil {
+		if rawClients == nil {
 			continue
 		}
+		clients := expandClientsForSubscription(rawClients)
 		if len(inbound.Listen) > 0 && inbound.Listen[0] == '@' {
 			listen, port, streamSettings, err := s.SubService.getFallbackMaster(inbound.Listen, inbound.StreamSettings)
 			if err == nil {

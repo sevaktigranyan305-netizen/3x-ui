@@ -2011,6 +2011,33 @@ class Inbound extends XrayCommonClass {
     }
 
     genAllLinks(remark = '', remarkModel = '-ieo', client) {
+        // Devices feature: a VLESS parent with at least one device produces one
+        // link per enabled device instead of a single link for the parent. The
+        // synthetic client mirrors the server-side expansion: email is
+        // "<parent>-<device.name>", id is the device's UUID, flow falls back to
+        // the parent when the device leaves it blank.
+        if (client && Array.isArray(client.devices) && client.devices.length > 0) {
+            let result = [];
+            client.devices.forEach((device) => {
+                if (!device || !device.name || !device.id || device.enable === false) {
+                    return;
+                }
+                const synth = Object.assign({}, client);
+                synth.email = (client.email || '') + '-' + device.name;
+                synth.id = device.id;
+                if (device.flow) synth.flow = device.flow;
+                synth.devices = undefined;
+                this._genAllLinksFor(remark, remarkModel, synth).forEach(l => result.push(l));
+            });
+            return result;
+        }
+        return this._genAllLinksFor(remark, remarkModel, client);
+    }
+
+    // Internal: original genAllLinks body, parameterised over a single client.
+    // Keeps the externalProxy fan-out working unchanged for legacy single-
+    // device clients and for synthetic per-device clients above.
+    _genAllLinksFor(remark, remarkModel, client) {
         let result = [];
         let email = client ? client.email : '';
         let addr = !ObjectUtil.isEmpty(this.listen) && this.listen !== "0.0.0.0" ? this.listen : location.hostname;
@@ -2414,26 +2441,102 @@ Inbound.VLESSSettings.VLESS = class extends Inbound.ClientBase {
         id = RandomUtil.randomUUID(),
         flow = '',
         email, limitIp, totalGB, expiryTime, enable, tgId, subId, comment, reset, created_at, updated_at,
+        // Devices feature: a VLESS client may carry an array of Device objects.
+        // When non-empty, the parent client (this VLESS object) becomes invisible
+        // to xray; one xray user is emitted per enabled device with email
+        // "<parent>-<device.name>" and the device's own UUID. Per-client limits
+        // (totalGB, expiryTime) live on the parent and are summed across devices
+        // server-side.
+        devices = [],
     ) {
         super(email, limitIp, totalGB, expiryTime, enable, tgId, subId, comment, reset, created_at, updated_at);
         this.id = id;
         this.flow = flow;
+        this.devices = devices;
     }
 
     static fromJson(json = {}) {
+        const devices = (json.devices || []).map(d => Inbound.VLESSSettings.VLESS.Device.fromJson(d));
         return new Inbound.VLESSSettings.VLESS(
             json.id,
             json.flow,
             ...Inbound.ClientBase.commonArgsFromJson(json),
+            devices,
         );
     }
 
     toJson() {
-        return {
+        const out = {
             id: this.id,
             flow: this.flow,
             ...this._clientBaseToJson(),
         };
+        if (this.devices && this.devices.length > 0) {
+            out.devices = this.devices.map(d => d.toJson());
+        }
+        return out;
+    }
+
+    addDevice() {
+        this.devices.push(new Inbound.VLESSSettings.VLESS.Device());
+    }
+
+    delDevice(index) {
+        this.devices.splice(index, 1);
+    }
+};
+
+// One device under a VLESS parent. Maps 1:1 onto the Go-side model.Device.
+// name + id are required; flow/limitIp/comment fall back to the parent when
+// blank/zero. enable is the per-device toggle (effective enable is parent.enable
+// && device.enable). Timestamps are server-authoritative and only round-trip
+// through here so they survive an edit cycle.
+Inbound.VLESSSettings.VLESS.Device = class {
+    constructor(
+        name = '',
+        id = RandomUtil.randomUUID(),
+        flow = '',
+        limitIp = 0,
+        enable = true,
+        comment = '',
+        created_at = 0,
+        updated_at = 0,
+    ) {
+        this.name = name;
+        this.id = id;
+        this.flow = flow;
+        this.limitIp = limitIp;
+        this.enable = enable;
+        this.comment = comment;
+        this.created_at = created_at;
+        this.updated_at = updated_at;
+    }
+
+    static fromJson(json = {}) {
+        return new Inbound.VLESSSettings.VLESS.Device(
+            json.name || '',
+            json.id || RandomUtil.randomUUID(),
+            json.flow || '',
+            json.limitIp || 0,
+            json.enable !== undefined ? !!json.enable : true,
+            json.comment || '',
+            json.created_at || 0,
+            json.updated_at || 0,
+        );
+    }
+
+    toJson() {
+        const out = {
+            name: this.name,
+            id: this.id,
+            enable: !!this.enable,
+        };
+        if (this.flow) out.flow = this.flow;
+        if (this.limitIp > 0) out.limitIp = this.limitIp;
+        if (this.comment) out.comment = this.comment;
+        if (this.created_at) out.created_at = this.created_at;
+        if (this.updated_at) out.updated_at = this.updated_at;
+        return out;
     }
 };
 

@@ -39,13 +39,14 @@ func (s *SubClashService) GetClash(subId string, host string) (string, string, e
 	var proxies []map[string]any
 
 	for _, inbound := range inbounds {
-		clients, err := s.inboundService.GetClients(inbound)
+		rawClients, err := s.inboundService.GetClients(inbound)
 		if err != nil {
 			logger.Error("SubClashService - GetClients: Unable to get clients from inbound")
 		}
-		if clients == nil {
+		if rawClients == nil {
 			continue
 		}
+		clients := expandClientsForSubscription(rawClients)
 		if len(inbound.Listen) > 0 && inbound.Listen[0] == '@' {
 			listen, port, streamSettings, err := s.SubService.getFallbackMaster(inbound.Listen, inbound.StreamSettings)
 			if err == nil {

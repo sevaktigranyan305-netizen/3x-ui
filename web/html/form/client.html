@@ -80,6 +80,55 @@
     </template>
     <a-input v-model.trim="client.id"></a-input>
   </a-form-item>
+  <!--
+    Devices section — VLESS only. When this list has at least one row, xray
+    sees one user per device (email "<client.email>-<device.name>", device's
+    own UUID). The parent's own ID above becomes a stable handle for API
+    lookups but is never used as an xray user. Per-client traffic limits and
+    expiry below still apply, but server-side they are checked against the
+    SUM of all device traffic.
+  -->
+  <a-form-item v-if="inbound.protocol === Protocols.VLESS && client.devices">
+    <template slot="label">
+      <a-tooltip>
+        <template slot="title">
+          <span>One xray user per row, email becomes "client.email-device.name". Empty list = legacy single-device client.</span>
+        </template>
+        Devices
+        <a-icon type="question-circle"></a-icon>
+      </a-tooltip>
+    </template>
+    <div v-if="client.devices.length === 0" :style="{ color: 'var(--color-text-secondary)' }">
+      No devices — using legacy single-client mode.
+    </div>
+    <div v-for="(device, dIdx) in client.devices" :key="dIdx" :style="{ marginBottom: '8px', padding: '8px', border: '1px solid #e8e8e8', borderRadius: '4px' }">
+      <a-row :gutter="6" type="flex" align="middle">
+        <a-col :span="6">
+          <a-input v-model.trim="device.name" placeholder="device name (e.g. pc, phone)"></a-input>
+        </a-col>
+        <a-col :span="11">
+          <a-input v-model.trim="device.id" placeholder="UUID">
+            <a-icon
+              slot="suffix"
+              type="sync"
+              @click="device.id = RandomUtil.randomUUID()"
+            ></a-icon>
+          </a-input>
+        </a-col>
+        <a-col :span="3">
+          <a-switch v-model="device.enable"></a-switch>
+        </a-col>
+        <a-col :span="3">
+          <a-button type="link" :style="{ color: '#FF4D4F' }" @click="client.delDevice(dIdx)">
+            <a-icon type="delete"></a-icon>
+          </a-button>
+        </a-col>
+      </a-row>
+    </div>
+    <a-button type="dashed" block @click="client.addDevice()" :style="{ marginTop: '4px' }">
+      <a-icon type="plus"></a-icon> Add device
+    </a-button>
+  </a-form-item>
   <a-form-item
     v-if="inbound.protocol === Protocols.VMESS"
     label='{{ i18n "security" }}'

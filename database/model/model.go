@@ -130,21 +130,60 @@ type CustomGeoResource struct {
 }
 
 // Client represents a client configuration for Xray inbounds with traffic limits and settings.
+//
+// A client may carry one or more Devices. When Devices is non-empty, the client
+// becomes a logical container ("user") and its Devices are what xray actually sees:
+// each device is emitted into xray's settings.clients[] as an independent entry whose
+// xray-side email is "<Client.Email>-<Device.Name>". Per-device traffic stats are
+// keyed by that derived email; parent-level limits (TotalGB, ExpiryTime) apply to
+// the SUM of per-device usage and are enforced by the panel by toggling Enable on
+// every device in the client at once.
+//
+// When Devices is empty the panel falls back to legacy single-device behaviour
+// using the client's own ID/Flow as before — this keeps existing inbounds working
+// during rollout, but new clients should always carry at least one device.
 type Client struct {
-	ID         string `json:"id,omitempty"`                 // Unique client identifier
-	Security   string `json:"security"`                     // Security method (e.g., "auto", "aes-128-gcm")
-	Password   string `json:"password,omitempty"`           // Client password
-	Flow       string `json:"flow,omitempty"`               // Flow control (XTLS)
-	Auth       string `json:"auth,omitempty"`               // Auth password (Hysteria)
-	Email      string `json:"email"`                        // Client email identifier
-	LimitIP    int    `json:"limitIp"`                      // IP limit for this client
-	TotalGB    int64  `json:"totalGB" form:"totalGB"`       // Total traffic limit in GB
-	ExpiryTime int64  `json:"expiryTime" form:"expiryTime"` // Expiration timestamp
-	Enable     bool   `json:"enable" form:"enable"`         // Whether the client is enabled
-	TgID       int64  `json:"tgId" form:"tgId"`             // Telegram user ID for notifications
-	SubID      string `json:"subId" form:"subId"`           // Subscription identifier
-	Comment    string `json:"comment" form:"comment"`       // Client comment
-	Reset      int    `json:"reset" form:"reset"`           // Reset period in days
-	CreatedAt  int64  `json:"created_at,omitempty"`         // Creation timestamp
-	UpdatedAt  int64  `json:"updated_at,omitempty"`         // Last update timestamp
+	ID         string   `json:"id,omitempty"`                 // Unique client identifier (legacy single-device mode)
+	Security   string   `json:"security"`                     // Security method (e.g., "auto", "aes-128-gcm")
+	Password   string   `json:"password,omitempty"`           // Client password
+	Flow       string   `json:"flow,omitempty"`               // Flow control (XTLS), inherited by devices that omit it
+	Auth       string   `json:"auth,omitempty"`               // Auth password (Hysteria)
+	Email      string   `json:"email"`                        // Client email identifier (the "user" name)
+	LimitIP    int      `json:"limitIp"`                      // IP limit for this client (inherited by devices)
+	TotalGB    int64    `json:"totalGB" form:"totalGB"`       // Total traffic limit in GB (sum across all devices)
+	ExpiryTime int64    `json:"expiryTime" form:"expiryTime"` // Expiration timestamp (applies to the whole client)
+	Enable     bool     `json:"enable" form:"enable"`         // Master enable for the client
+	TgID       int64    `json:"tgId" form:"tgId"`             // Telegram user ID for notifications
+	SubID      string   `json:"subId" form:"subId"`           // Subscription identifier
+	Comment    string   `json:"comment" form:"comment"`       // Client comment
+	Reset      int      `json:"reset" form:"reset"`           // Reset period in days
+	CreatedAt  int64    `json:"created_at,omitempty"`         // Creation timestamp
+	UpdatedAt  int64    `json:"updated_at,omitempty"`         // Last update timestamp
+	Devices    []Device `json:"devices,omitempty"`            // Devices belonging to this client; each becomes a flat xray client
+}
+
+// Device represents one physical device of a Client. Each device gets its own UUID
+// and appears to xray as an independent client whose email is "<Client.Email>-<Device.Name>".
+//
+// Per-device fields:
+//   - Name: free-form label, must be non-empty and unique within the client. Used
+//     to derive the xray-side email; restricted to characters safe in xray emails
+//     (validated at write time, not here).
+//   - ID: the device's UUID. Distinct UUIDs are what let virtualnet IPAM hand out
+//     distinct sequential IPs to phone/pc/mac of the same user.
+//   - Flow / LimitIP: optional per-device overrides; if zero/empty, parent values apply.
+//   - Enable: per-device toggle; effective enable = Client.Enable && Device.Enable.
+//
+// Traffic limit and expiry intentionally live on the parent Client, not on Device:
+// the panel sums per-device traffic (each device has its own stats row keyed by the
+// derived email) and disables the entire client when the parent limit is hit.
+type Device struct {
+	Name      string `json:"name"`                 // Device label (e.g. "pc", "phone", "abcd")
+	ID        string `json:"id"`                   // Device UUID
+	Flow      string `json:"flow,omitempty"`       // Optional per-device flow override
+	LimitIP   int    `json:"limitIp,omitempty"`    // Optional per-device IP limit override
+	Enable    bool   `json:"enable" form:"enable"` // Per-device enable toggle
+	Comment   string `json:"comment,omitempty"`    // Optional per-device note
+	CreatedAt int64  `json:"created_at,omitempty"` // Creation timestamp
+	UpdatedAt int64  `json:"updated_at,omitempty"` // Last update timestamp
 }

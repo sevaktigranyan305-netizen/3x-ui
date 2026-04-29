@@ -90,6 +90,145 @@ func RemoveIndex(s []any, index int) []any {
 	return append(s[:index], s[index+1:]...)
 }
 
+// expandClientDevices takes a single parsed client object from settings.clients[]
+// and returns the list of flat client entries to emit to xray.
+//
+// If the client carries a non-empty "devices" array, every device produces one
+// emitted entry whose email is "<client.email>-<device.name>" and whose id is the
+// device's own UUID; per-device flow / limitIp override the parent if non-zero.
+// A device with enable==false is skipped.
+//
+// If devices is missing or empty, the original client object is returned as a
+// single-entry slice unchanged (legacy single-device mode).
+//
+// Each returned map is a fresh copy and safe to mutate.
+func expandClientDevices(c map[string]any) []map[string]any {
+	parentEmail, _ := c["email"].(string)
+	devicesRaw, _ := c["devices"].([]any)
+	if len(devicesRaw) == 0 {
+		// Legacy single-device mode: pass through (caller still strips extras).
+		out := make(map[string]any, len(c))
+		for k, v := range c {
+			if k == "devices" {
+				continue
+			}
+			out[k] = v
+		}
+		return []map[string]any{out}
+	}
+
+	parentFlow, _ := c["flow"].(string)
+	parentLimitIP, _ := c["limitIp"].(float64)
+
+	flat := make([]map[string]any, 0, len(devicesRaw))
+	for _, dRaw := range devicesRaw {
+		d, ok := dRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := d["name"].(string)
+		id, _ := d["id"].(string)
+		if name == "" || id == "" {
+			continue
+		}
+		if enable, ok := d["enable"].(bool); ok && !enable {
+			continue
+		}
+		entry := map[string]any{
+			"email": parentEmail + "-" + name,
+			"id":    id,
+		}
+		if flow, ok := d["flow"].(string); ok && flow != "" {
+			entry["flow"] = flow
+		} else if parentFlow != "" {
+			entry["flow"] = parentFlow
+		}
+		if limitIP, ok := d["limitIp"].(float64); ok && limitIP > 0 {
+			entry["limitIp"] = limitIP
+		} else if parentLimitIP > 0 {
+			entry["limitIp"] = parentLimitIP
+		}
+		// Carry over auth/password/security if the parent set them (Trojan/SS/etc.).
+		for _, k := range []string{"password", "method", "auth", "security"} {
+			if v, ok := c[k]; ok {
+				if _, exists := entry[k]; !exists {
+					entry[k] = v
+				}
+			}
+		}
+		flat = append(flat, entry)
+	}
+	return flat
+}
+
+// expandRoutingRules walks the parsed routing config and rewrites every
+// rules[].user entry that references a parent client name (i.e. an entry that
+// matches an Email in clientDevices) into the full list of derived device emails.
+//
+// Entries that don't match any parent name are left untouched, so device-level
+// rules ("test-phone") and unrelated user entries continue to work.
+//
+// clientDevices maps parent client email -> ordered list of derived device emails
+// ("test" -> ["test-pc","test-phone"]).
+//
+// The function is conservative: a missing/non-object routing config is returned
+// as-is, and parsing failures fall through to leave the input unchanged.
+func expandRoutingRules(routerCfg []byte, clientDevices map[string][]string) []byte {
+	if len(routerCfg) == 0 || len(clientDevices) == 0 {
+		return routerCfg
+	}
+	var router map[string]any
+	if err := json.Unmarshal(routerCfg, &router); err != nil {
+		return routerCfg
+	}
+	rulesRaw, ok := router["rules"].([]any)
+	if !ok {
+		return routerCfg
+	}
+	changed := false
+	for i, ruleRaw := range rulesRaw {
+		rule, ok := ruleRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		usersRaw, ok := rule["user"].([]any)
+		if !ok {
+			continue
+		}
+		expanded := make([]any, 0, len(usersRaw))
+		ruleChanged := false
+		for _, u := range usersRaw {
+			s, ok := u.(string)
+			if !ok {
+				expanded = append(expanded, u)
+				continue
+			}
+			if devices, exists := clientDevices[s]; exists {
+				for _, d := range devices {
+					expanded = append(expanded, d)
+				}
+				ruleChanged = true
+				continue
+			}
+			expanded = append(expanded, s)
+		}
+		if ruleChanged {
+			rule["user"] = expanded
+			rulesRaw[i] = rule
+			changed = true
+		}
+	}
+	if !changed {
+		return routerCfg
+	}
+	router["rules"] = rulesRaw
+	out, err := json.Marshal(router)
+	if err != nil {
+		return routerCfg
+	}
+	return out
+}
+
 // GetXrayConfig retrieves and builds the Xray configuration from settings and inbounds.
 func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	templateConfig, err := s.settingService.GetXrayConfigTemplate()
@@ -109,6 +248,10 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// clientDevices accumulates parent-email -> [device-email,...] for the
+	// routing-rule expansion pass after all inbounds are processed.
+	clientDevices := map[string][]string{}
+
 	for _, inbound := range inbounds {
 		if !inbound.Enable {
 			continue
@@ -133,29 +276,57 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 					continue
 				}
 
-				email, _ := c["email"].(string)
+				parentEmail, _ := c["email"].(string)
 
-				// check users active or not via stats
-				if enable, exists := enableMap[email]; exists && !enable {
-					logger.Infof("Remove Inbound User %s due to expiration or traffic limit", email)
-					continue
-				}
-
-				// check manual disabled flag
+				// Master enable on the parent client gates every device under it.
 				if manualEnable, ok := c["enable"].(bool); ok && !manualEnable {
 					continue
 				}
-
-				// clear client config for additional parameters
-				for key := range c {
-					if key != "email" && key != "id" && key != "password" && key != "flow" && key != "method" && key != "auth" {
-						delete(c, key)
-					}
-					if flow, ok := c["flow"].(string); ok && flow == "xtls-rprx-vision-udp443" {
-						c["flow"] = "xtls-rprx-vision"
+				// Per-client traffic limit / expiry: when the limit-enforcement
+				// job has set the parent's stat row enable=false, every device
+				// under it must vanish from the emitted xray config too.
+				if enable, exists := enableMap[parentEmail]; exists && !enable {
+					if devicesRaw, ok := c["devices"].([]any); ok && len(devicesRaw) > 0 {
+						logger.Infof("Skip client %s and all its devices due to per-client expiration / traffic limit", parentEmail)
+						continue
 					}
 				}
-				final_clients = append(final_clients, any(c))
+
+				// Expand into one entry per device (or pass-through for legacy
+				// single-device clients).
+				flatEntries := expandClientDevices(c)
+				if len(flatEntries) > 1 || (len(flatEntries) == 1 && flatEntries[0]["email"] != parentEmail) {
+					emails := make([]string, 0, len(flatEntries))
+					for _, e := range flatEntries {
+						if em, _ := e["email"].(string); em != "" {
+							emails = append(emails, em)
+						}
+					}
+					if len(emails) > 0 {
+						clientDevices[parentEmail] = emails
+					}
+				}
+
+				for _, entry := range flatEntries {
+					email, _ := entry["email"].(string)
+
+					// check users active or not via stats (per-device email)
+					if enable, exists := enableMap[email]; exists && !enable {
+						logger.Infof("Remove Inbound User %s due to expiration or traffic limit", email)
+						continue
+					}
+
+					// clear client config for additional parameters
+					for key := range entry {
+						if key != "email" && key != "id" && key != "password" && key != "flow" && key != "method" && key != "auth" {
+							delete(entry, key)
+						}
+						if flow, ok := entry["flow"].(string); ok && flow == "xtls-rprx-vision-udp443" {
+							entry["flow"] = "xtls-rprx-vision"
+						}
+					}
+					final_clients = append(final_clients, any(entry))
+				}
 			}
 
 			settings["clients"] = final_clients
@@ -195,6 +366,14 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		inboundConfig := inbound.GenXrayInboundConfig()
 		xrayConfig.InboundConfigs = append(xrayConfig.InboundConfigs, *inboundConfig)
 	}
+
+	// Expand routing rules: any rules[].user that names a parent client
+	// (e.g. "test") is rewritten to the full list of derived device emails
+	// ("test-pc","test-phone",...). Device-level entries pass through unchanged.
+	if expanded := expandRoutingRules(xrayConfig.RouterConfig, clientDevices); len(expanded) > 0 {
+		xrayConfig.RouterConfig = expanded
+	}
+
 	return xrayConfig, nil
 }
 

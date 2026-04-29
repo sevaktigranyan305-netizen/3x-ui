@@ -134,6 +134,74 @@ func (s *InboundService) checkPortExist(listen string, port int, ignoreId int) (
 	return count > 0, nil
 }
 
+// validateDevices checks that every device on the parent client has a
+// non-empty Name and ID and that names are unique within the client. It is a
+// no-op for parents without devices.
+//
+// Device names must be non-empty so the derived xray email "<parent>-<name>"
+// has a stable suffix; IDs must be non-empty so each device represents a
+// distinct xray user; and uniqueness within the parent is necessary because
+// the derived email collides otherwise.
+func validateDevices(client model.Client) error {
+	if len(client.Devices) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(client.Devices))
+	for _, d := range client.Devices {
+		if d.Name == "" {
+			return common.NewError("device name is empty for client:", client.Email)
+		}
+		if d.ID == "" {
+			return common.NewError("device ID is empty for client:", client.Email, "device:", d.Name)
+		}
+		if _, ok := seen[d.Name]; ok {
+			return common.NewError("duplicate device name within client:", client.Email, "device:", d.Name)
+		}
+		seen[d.Name] = struct{}{}
+	}
+	return nil
+}
+
+// expandClientForXray returns the per-device synthetic clients that the xray
+// gRPC API and the client_traffics table should track for this parent. For a
+// parent without devices, it returns the parent itself wrapped in a one-element
+// slice (legacy single-device mode). For a parent with devices, it returns one
+// synthetic Client per device whose Email is "<parent>-<device.Name>", whose ID
+// is the device's UUID, and whose Flow / LimitIP fall back to the parent when
+// the device leaves them blank. Per-client limits (TotalGB, ExpiryTime) are
+// intentionally NOT carried into the synthetic clients — those limits live on
+// the parent's own client_traffics row and are summed across devices by the
+// per-client enforcement job.
+func expandClientForXray(parent model.Client) []model.Client {
+	if len(parent.Devices) == 0 {
+		return []model.Client{parent}
+	}
+	out := make([]model.Client, 0, len(parent.Devices))
+	for _, d := range parent.Devices {
+		if d.Name == "" || d.ID == "" {
+			continue
+		}
+		synth := parent
+		synth.Devices = nil
+		synth.Email = parent.Email + "-" + d.Name
+		synth.ID = d.ID
+		if d.Flow != "" {
+			synth.Flow = d.Flow
+		}
+		if d.LimitIP > 0 {
+			synth.LimitIP = d.LimitIP
+		}
+		// Per-device rows track only Up/Down — they intentionally have no
+		// individual traffic cap or expiry; those live on the parent.
+		synth.TotalGB = 0
+		synth.ExpiryTime = 0
+		// Effective enable = parent.Enable && device.Enable.
+		synth.Enable = parent.Enable && d.Enable
+		out = append(out, synth)
+	}
+	return out
+}
+
 func (s *InboundService) GetClients(inbound *model.Inbound) ([]model.Client, error) {
 	settings := map[string][]model.Client{}
 	json.Unmarshal([]byte(inbound.Settings), &settings)
@@ -671,7 +739,10 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 		return false, err
 	}
 
-	// Secure client ID
+	// Secure client ID. For VLESS/VMess (default branch) a client must have
+	// either its own .ID set (legacy single-device mode) or at least one well-
+	// formed device (every device must have non-empty Name and ID, and within
+	// one client device names must be unique).
 	for _, client := range clients {
 		switch oldInbound.Protocol {
 		case "trojan":
@@ -687,8 +758,11 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 				return false, common.NewError("empty client ID")
 			}
 		default:
-			if client.ID == "" {
+			if client.ID == "" && len(client.Devices) == 0 {
 				return false, common.NewError("empty client ID")
+			}
+			if err := validateDevices(client); err != nil {
+				return false, err
 			}
 		}
 	}
@@ -725,31 +799,50 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	needRestart := false
 	s.xrayApi.Init(p.GetAPIPort())
 	for _, client := range clients {
-		if len(client.Email) > 0 {
-			s.AddClientStat(tx, data.Id, &client)
-			if client.Enable {
-				cipher := ""
-				if oldInbound.Protocol == "shadowsocks" {
-					cipher = oldSettings["method"].(string)
-				}
-				err1 := s.xrayApi.AddUser(string(oldInbound.Protocol), oldInbound.Tag, map[string]any{
-					"email":    client.Email,
-					"id":       client.ID,
-					"auth":     client.Auth,
-					"security": client.Security,
-					"flow":     client.Flow,
-					"password": client.Password,
-					"cipher":   cipher,
-				})
-				if err1 == nil {
-					logger.Debug("Client added by api:", client.Email)
-				} else {
-					logger.Debug("Error in adding client by api:", err1)
-					needRestart = true
-				}
-			}
-		} else {
+		if len(client.Email) == 0 {
 			needRestart = true
+			continue
+		}
+		// Always create a parent-level stat row. This row holds the per-client
+		// TotalGB / ExpiryTime limits and tracks the SUM of all device traffic
+		// (the per-client enforcement job aggregates device rows into it). When
+		// the client has no devices, the parent row IS the device row and works
+		// the same as before.
+		s.AddClientStat(tx, data.Id, &client)
+
+		// xray gRPC: a parent without devices is added directly (legacy path).
+		// A parent with devices is itself invisible to xray; we add one xray
+		// user per enabled device, and we also create a stat row per device so
+		// the per-device counters work.
+		xrayEntries := expandClientForXray(client)
+		hasDevices := len(client.Devices) > 0
+		for _, entry := range xrayEntries {
+			if hasDevices {
+				// Anchor stats row for this device; per-device limits stay zero.
+				s.AddClientStat(tx, data.Id, &entry)
+			}
+			if !entry.Enable {
+				continue
+			}
+			cipher := ""
+			if oldInbound.Protocol == "shadowsocks" {
+				cipher = oldSettings["method"].(string)
+			}
+			err1 := s.xrayApi.AddUser(string(oldInbound.Protocol), oldInbound.Tag, map[string]any{
+				"email":    entry.Email,
+				"id":       entry.ID,
+				"auth":     entry.Auth,
+				"security": entry.Security,
+				"flow":     entry.Flow,
+				"password": entry.Password,
+				"cipher":   cipher,
+			})
+			if err1 == nil {
+				logger.Debug("Client added by api:", entry.Email)
+			} else {
+				logger.Debug("Error in adding client by api:", err1)
+				needRestart = true
+			}
 		}
 	}
 	s.xrayApi.Close()
@@ -979,12 +1072,25 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 	interfaceClients := settings["clients"].([]any)
 	var newClients []any
 	needApiDel := false
+	// deviceEmails captures the derived emails of every device on the matched
+	// parent client so we can delete their stat rows and xray users alongside
+	// the parent's own row.
+	var deviceEmails []string
 	for _, client := range interfaceClients {
 		c := client.(map[string]any)
 		c_id := c[client_key].(string)
 		if c_id == clientId {
 			email, _ = c["email"].(string)
 			needApiDel, _ = c["enable"].(bool)
+			if devices, ok := c["devices"].([]any); ok {
+				for _, dRaw := range devices {
+					if d, ok := dRaw.(map[string]any); ok {
+						if name, _ := d["name"].(string); name != "" && email != "" {
+							deviceEmails = append(deviceEmails, email+"-"+name)
+						}
+					}
+				}
+			}
 		} else {
 			newClients = append(newClients, client)
 		}
@@ -1011,6 +1117,13 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 	}
 	needRestart := false
 
+	// Delete IPAM scoping for every device, not just the parent.
+	for _, devEmail := range deviceEmails {
+		if err := s.DelClientIPs(db, devEmail); err != nil {
+			logger.Error("Error in delete device client IPs:", devEmail, err)
+		}
+	}
+
 	if len(email) > 0 {
 		notDepleted := true
 		err = db.Model(xray.ClientTraffic{}).Select("enable").Where("email = ?", email).First(&notDepleted).Error
@@ -1023,18 +1136,32 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 			logger.Error("Delete stats Data Error")
 			return false, err
 		}
+		// Drop every device's stat row too.
+		for _, devEmail := range deviceEmails {
+			if err := s.DelClientStat(db, devEmail); err != nil {
+				logger.Error("Delete device stats error:", devEmail, err)
+			}
+		}
 		if needApiDel && notDepleted {
 			s.xrayApi.Init(p.GetAPIPort())
-			err1 := s.xrayApi.RemoveUser(oldInbound.Tag, email)
-			if err1 == nil {
-				logger.Debug("Client deleted by api:", email)
-				needRestart = false
-			} else {
-				if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", email)) {
-					logger.Debug("User is already deleted. Nothing to do more...")
+			// For a parent without devices, delete the parent itself from xray.
+			// For a parent with devices, the parent doesn't exist in xray; we
+			// only need to remove each device user.
+			emailsToRemove := deviceEmails
+			if len(emailsToRemove) == 0 {
+				emailsToRemove = []string{email}
+			}
+			for _, em := range emailsToRemove {
+				err1 := s.xrayApi.RemoveUser(oldInbound.Tag, em)
+				if err1 == nil {
+					logger.Debug("Client deleted by api:", em)
 				} else {
-					logger.Debug("Error in deleting client by api:", err1)
-					needRestart = true
+					if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", em)) {
+						logger.Debug("User is already deleted. Nothing to do more...")
+					} else {
+						logger.Debug("Error in deleting client by api:", err1)
+						needRestart = true
+					}
 				}
 			}
 			s.xrayApi.Close()
@@ -1154,6 +1281,9 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		}
 	}()
 
+	// Parent-level stat update / removal (limit, expiry, email, enable on the
+	// parent row). For parent-with-devices, this row holds the per-client cap
+	// and aggregate Up/Down; for legacy single-device clients it IS the row.
 	if len(clients[0].Email) > 0 {
 		if len(oldEmail) > 0 {
 			err = s.UpdateClientStat(tx, oldEmail, &clients[0])
@@ -1177,27 +1307,136 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 			return false, err
 		}
 	}
+
+	// Reconcile the per-device stat rows. We diff old devices vs new devices
+	// keyed by Name. Devices removed from the array → drop their stat row and
+	// xray user. Devices added → create stat row and xray user. Devices that
+	// stayed but whose parent email changed → rename their stat row's email so
+	// device-level traffic counters survive the parent rename. When a device's
+	// own UUID changed it has effectively become a new xray user; we treat that
+	// as remove-old-then-add-new and accept the counter reset.
+	oldDevices := oldClients[clientIndex].Devices
+	newDevices := clients[0].Devices
+	oldByName := make(map[string]model.Device, len(oldDevices))
+	for _, d := range oldDevices {
+		oldByName[d.Name] = d
+	}
+	newByName := make(map[string]model.Device, len(newDevices))
+	for _, d := range newDevices {
+		newByName[d.Name] = d
+	}
+	deviceStatChanged := false
+	addedDevices := make([]model.Client, 0, len(newDevices))
+	removedDeviceEmails := make([]string, 0, len(oldDevices))
+	for name, oldDev := range oldByName {
+		newDev, kept := newByName[name]
+		oldDevEmail := oldEmail + "-" + name
+		if !kept || newDev.ID != oldDev.ID {
+			removedDeviceEmails = append(removedDeviceEmails, oldDevEmail)
+			if err := s.DelClientStat(tx, oldDevEmail); err != nil {
+				return false, err
+			}
+			if err := s.DelClientIPs(tx, oldDevEmail); err != nil {
+				return false, err
+			}
+			deviceStatChanged = true
+			if !kept {
+				continue
+			}
+			// UUID changed → fall through to add as a new device entry below.
+		}
+		if kept && newDev.ID == oldDev.ID {
+			// Pure metadata change (or just inherited parent rename).
+			newDevEmail := clients[0].Email + "-" + name
+			if newDevEmail != oldDevEmail {
+				synth := expandClientForXray(clients[0])
+				for i := range synth {
+					if synth[i].Email == newDevEmail {
+						if err := s.UpdateClientStat(tx, oldDevEmail, &synth[i]); err != nil {
+							return false, err
+						}
+						if err := s.UpdateClientIPs(tx, oldDevEmail, newDevEmail); err != nil {
+							return false, err
+						}
+						break
+					}
+				}
+				deviceStatChanged = true
+			}
+		}
+	}
+	for name, newDev := range newByName {
+		oldDev, kept := oldByName[name]
+		if kept && newDev.ID == oldDev.ID {
+			continue
+		}
+		// New device, or UUID-replaced device after the remove pass above.
+		synth := expandClientForXray(clients[0])
+		for i := range synth {
+			if synth[i].Email == clients[0].Email+"-"+name {
+				if err := s.AddClientStat(tx, data.Id, &synth[i]); err != nil {
+					return false, err
+				}
+				addedDevices = append(addedDevices, synth[i])
+				deviceStatChanged = true
+				break
+			}
+		}
+	}
+
 	needRestart := false
 	if len(oldEmail) > 0 {
 		s.xrayApi.Init(p.GetAPIPort())
-		if oldClients[clientIndex].Enable {
-			err1 := s.xrayApi.RemoveUser(oldInbound.Tag, oldEmail)
-			if err1 == nil {
-				logger.Debug("Old client deleted by api:", oldEmail)
-			} else {
-				if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", oldEmail)) {
-					logger.Debug("User is already deleted. Nothing to do more...")
-				} else {
-					logger.Debug("Error in deleting client by api:", err1)
+		hadDevices := len(oldDevices) > 0
+		hasDevices := len(newDevices) > 0
+
+		// Drop the previous xray representation of this client.
+		if hadDevices {
+			for _, d := range oldDevices {
+				em := oldEmail + "-" + d.Name
+				err1 := s.xrayApi.RemoveUser(oldInbound.Tag, em)
+				if err1 != nil && !strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", em)) {
+					logger.Debug("Error in deleting device user by api:", err1)
 					needRestart = true
 				}
 			}
-		}
-		if clients[0].Enable {
-			cipher := ""
-			if oldInbound.Protocol == "shadowsocks" {
-				cipher = oldSettings["method"].(string)
+		} else if oldClients[clientIndex].Enable {
+			err1 := s.xrayApi.RemoveUser(oldInbound.Tag, oldEmail)
+			if err1 == nil {
+				logger.Debug("Old client deleted by api:", oldEmail)
+			} else if !strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", oldEmail)) {
+				logger.Debug("Error in deleting client by api:", err1)
+				needRestart = true
 			}
+		}
+
+		// Re-register the new representation.
+		cipher := ""
+		if oldInbound.Protocol == "shadowsocks" {
+			cipher = oldSettings["method"].(string)
+		}
+		if hasDevices {
+			for _, entry := range expandClientForXray(clients[0]) {
+				if !entry.Enable {
+					continue
+				}
+				err1 := s.xrayApi.AddUser(string(oldInbound.Protocol), oldInbound.Tag, map[string]any{
+					"email":    entry.Email,
+					"id":       entry.ID,
+					"security": entry.Security,
+					"flow":     entry.Flow,
+					"auth":     entry.Auth,
+					"password": entry.Password,
+					"cipher":   cipher,
+				})
+				if err1 == nil {
+					logger.Debug("Device user added by api:", entry.Email)
+				} else {
+					logger.Debug("Error in adding device user by api:", err1)
+					needRestart = true
+				}
+			}
+		} else if clients[0].Enable {
 			err1 := s.xrayApi.AddUser(string(oldInbound.Protocol), oldInbound.Tag, map[string]any{
 				"email":    clients[0].Email,
 				"id":       clients[0].ID,
@@ -1218,6 +1457,11 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	} else {
 		logger.Debug("Client old email not found")
 		needRestart = true
+	}
+
+	// Light defensive log so the diff is visible during integration testing.
+	if deviceStatChanged {
+		logger.Debugf("device set changed for client %s: added=%d, removed=%d", clients[0].Email, len(addedDevices), len(removedDeviceEmails))
 	}
 	return needRestart, tx.Save(oldInbound).Error
 }
@@ -1250,11 +1494,26 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 		logger.Debugf("%v clients renewed", count)
 	}
 
+	// Per-client devices feature: roll up device-level Up/Down into the
+	// parent's stat row BEFORE the limit-enforcement query runs. The parent
+	// row is the only place where TotalGB lives for a client-with-devices, so
+	// without this aggregation the limit check would never trip.
+	if err := s.aggregateClientDeviceTraffic(tx); err != nil {
+		logger.Warning("Error aggregating device traffic:", err)
+	}
+
 	needRestart1, count, err := s.disableInvalidClients(tx)
 	if err != nil {
 		logger.Warning("Error in disabling invalid clients:", err)
 	} else if count > 0 {
 		logger.Debugf("%v clients disabled", count)
+	}
+
+	// Cascade: a parent row that just got disabled (because its TotalGB or
+	// ExpiryTime tripped) must take all its devices down with it.
+	needRestart3, err := s.cascadeDeviceDisable(tx)
+	if err != nil {
+		logger.Warning("Error cascading device disable:", err)
 	}
 
 	needRestart2, count, err := s.disableInvalidInbounds(tx)
@@ -1263,7 +1522,121 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	} else if count > 0 {
 		logger.Debugf("%v inbounds disabled", count)
 	}
-	return nil, (needRestart0 || needRestart1 || needRestart2)
+	return nil, (needRestart0 || needRestart1 || needRestart2 || needRestart3)
+}
+
+// aggregateClientDeviceTraffic walks every inbound, finds clients with a
+// non-empty Devices array, and writes the SUM of those devices' Up / Down /
+// AllTime into the parent's client_traffics row. It is idempotent — every tick
+// of the traffic job recomputes the totals from current device counters, so a
+// missed tick or partial write self-corrects on the next pass.
+//
+// We deliberately skip clients without devices: their parent row IS the device
+// row, so summing would double-count. We also skip if the parent has no row —
+// that can happen if the parent was created before the devices feature landed
+// and never had AddClientStat called on it.
+func (s *InboundService) aggregateClientDeviceTraffic(tx *gorm.DB) error {
+	var inbounds []*model.Inbound
+	if err := tx.Find(&inbounds).Error; err != nil {
+		return err
+	}
+	for _, ib := range inbounds {
+		clients, err := s.GetClients(ib)
+		if err != nil {
+			continue
+		}
+		for _, c := range clients {
+			if len(c.Devices) == 0 {
+				continue
+			}
+			devEmails := make([]string, 0, len(c.Devices))
+			for _, d := range c.Devices {
+				if d.Name == "" {
+					continue
+				}
+				devEmails = append(devEmails, c.Email+"-"+d.Name)
+			}
+			if len(devEmails) == 0 {
+				continue
+			}
+			var totals struct {
+				Up      int64
+				Down    int64
+				AllTime int64
+			}
+			if err := tx.Model(&xray.ClientTraffic{}).
+				Where("email IN ?", devEmails).
+				Select("COALESCE(SUM(up), 0) AS up, COALESCE(SUM(down), 0) AS down, COALESCE(SUM(all_time), 0) AS all_time").
+				Scan(&totals).Error; err != nil {
+				continue
+			}
+			tx.Model(&xray.ClientTraffic{}).
+				Where("email = ?", c.Email).
+				Updates(map[string]any{
+					"up":       totals.Up,
+					"down":     totals.Down,
+					"all_time": totals.AllTime,
+				})
+		}
+	}
+	return nil
+}
+
+// cascadeDeviceDisable propagates a disabled parent's state down to every
+// device underneath it. Once disableInvalidClients has flipped a parent row's
+// enable=false (because the parent's aggregated traffic crossed TotalGB or
+// ExpiryTime fired), we mirror that flag onto each <parent>-* device row and
+// remove the corresponding xray users so the tunnel actually stops carrying
+// traffic for them. Returns needRestart=true if any RemoveUser call failed
+// for a reason other than "user already gone".
+func (s *InboundService) cascadeDeviceDisable(tx *gorm.DB) (bool, error) {
+	needRestart := false
+	var inbounds []*model.Inbound
+	if err := tx.Find(&inbounds).Error; err != nil {
+		return false, err
+	}
+	if p != nil {
+		s.xrayApi.Init(p.GetAPIPort())
+		defer s.xrayApi.Close()
+	}
+	for _, ib := range inbounds {
+		clients, err := s.GetClients(ib)
+		if err != nil {
+			continue
+		}
+		for _, c := range clients {
+			if len(c.Devices) == 0 {
+				continue
+			}
+			row := struct{ Enable bool }{Enable: true}
+			if err := tx.Model(&xray.ClientTraffic{}).
+				Select("enable").
+				Where("email = ?", c.Email).
+				Scan(&row).Error; err != nil {
+				continue
+			}
+			if row.Enable {
+				continue
+			}
+			for _, d := range c.Devices {
+				if d.Name == "" {
+					continue
+				}
+				em := c.Email + "-" + d.Name
+				tx.Model(&xray.ClientTraffic{}).
+					Where("email = ?", em).
+					Update("enable", false)
+				if p != nil {
+					err1 := s.xrayApi.RemoveUser(ib.Tag, em)
+					if err1 != nil && !strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", em)) {
+						logger.Debug("cascade RemoveUser failed:", err1)
+						needRestart = true
+					}
+				}
+			}
+		}
+	}
+	return needRestart, nil
 }
 
 func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic) error {
