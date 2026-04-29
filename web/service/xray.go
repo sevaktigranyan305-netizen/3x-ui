@@ -282,6 +282,15 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 				if manualEnable, ok := c["enable"].(bool); ok && !manualEnable {
 					continue
 				}
+				// Per-client traffic limit / expiry: when the limit-enforcement
+				// job has set the parent's stat row enable=false, every device
+				// under it must vanish from the emitted xray config too.
+				if enable, exists := enableMap[parentEmail]; exists && !enable {
+					if devicesRaw, ok := c["devices"].([]any); ok && len(devicesRaw) > 0 {
+						logger.Infof("Skip client %s and all its devices due to per-client expiration / traffic limit", parentEmail)
+						continue
+					}
+				}
 
 				// Expand into one entry per device (or pass-through for legacy
 				// single-device clients).
