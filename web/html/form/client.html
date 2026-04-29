@@ -102,11 +102,22 @@
       No devices — using legacy single-client mode.
     </div>
     <div v-for="(device, dIdx) in client.devices" :key="dIdx" :style="{ marginBottom: '8px', padding: '8px', border: '1px solid #e8e8e8', borderRadius: '4px' }">
-      <a-row :gutter="6" type="flex" align="middle">
-        <a-col :span="6">
-          <a-input v-model.trim="device.name" placeholder="device name (e.g. pc, phone)"></a-input>
+      <a-row :gutter="6" type="flex" align="middle" :style="{ marginBottom: '4px' }">
+        <a-col :span="9">
+          <a-input v-model.trim="device.name" placeholder="name"></a-input>
         </a-col>
-        <a-col :span="11">
+        <a-col :span="11" :style="{ textAlign: 'right' }">
+          <span :style="{ marginRight: '8px', color: 'var(--color-text-secondary)' }">enable</span>
+          <a-switch v-model="device.enable"></a-switch>
+        </a-col>
+        <a-col :span="4" :style="{ textAlign: 'right' }">
+          <a-button type="link" :style="{ color: '#FF4D4F' }" @click="client.delDevice(dIdx)">
+            <a-icon type="delete"></a-icon>
+          </a-button>
+        </a-col>
+      </a-row>
+      <a-row :gutter="6" type="flex" align="middle">
+        <a-col :span="24">
           <a-input v-model.trim="device.id" placeholder="UUID">
             <a-icon
               slot="suffix"
@@ -114,14 +125,6 @@
               @click="device.id = RandomUtil.randomUUID()"
             ></a-icon>
           </a-input>
-        </a-col>
-        <a-col :span="3">
-          <a-switch v-model="device.enable"></a-switch>
-        </a-col>
-        <a-col :span="3">
-          <a-button type="link" :style="{ color: '#FF4D4F' }" @click="client.delDevice(dIdx)">
-            <a-icon type="delete"></a-icon>
-          </a-button>
         </a-col>
       </a-row>
     </div>
