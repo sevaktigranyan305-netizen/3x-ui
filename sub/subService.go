@@ -59,13 +59,14 @@ func (s *SubService) GetSubs(subId string, host string) ([]string, int64, xray.C
 		s.datepicker = "gregorian"
 	}
 	for _, inbound := range inbounds {
-		clients, err := s.inboundService.GetClients(inbound)
+		rawClients, err := s.inboundService.GetClients(inbound)
 		if err != nil {
 			logger.Error("SubService - GetClients: Unable to get clients from inbound")
 		}
-		if clients == nil {
+		if rawClients == nil {
 			continue
 		}
+		clients := expandClientsForSubscription(rawClients)
 		if len(inbound.Listen) > 0 && inbound.Listen[0] == '@' {
 			listen, port, streamSettings, err := s.getFallbackMaster(inbound.Listen, inbound.StreamSettings)
 			if err == nil {
@@ -292,7 +293,8 @@ func (s *SubService) genVmessLink(inbound *model.Inbound, email string) string {
 		}
 	}
 
-	clients, _ := s.inboundService.GetClients(inbound)
+	rawClients, _ := s.inboundService.GetClients(inbound)
+	clients := expandClientsForSubscription(rawClients)
 	clientIndex := -1
 	for i, client := range clients {
 		if client.Email == email {
@@ -351,7 +353,8 @@ func (s *SubService) genVlessLink(inbound *model.Inbound, email string) string {
 	}
 	var stream map[string]any
 	json.Unmarshal([]byte(inbound.StreamSettings), &stream)
-	clients, _ := s.inboundService.GetClients(inbound)
+	rawClients, _ := s.inboundService.GetClients(inbound)
+	clients := expandClientsForSubscription(rawClients)
 	clientIndex := -1
 	for i, client := range clients {
 		if client.Email == email {
@@ -555,7 +558,8 @@ func (s *SubService) genTrojanLink(inbound *model.Inbound, email string) string 
 	}
 	var stream map[string]any
 	json.Unmarshal([]byte(inbound.StreamSettings), &stream)
-	clients, _ := s.inboundService.GetClients(inbound)
+	rawClients, _ := s.inboundService.GetClients(inbound)
+	clients := expandClientsForSubscription(rawClients)
 	clientIndex := -1
 	for i, client := range clients {
 		if client.Email == email {
@@ -752,7 +756,8 @@ func (s *SubService) genShadowsocksLink(inbound *model.Inbound, email string) st
 	}
 	var stream map[string]any
 	json.Unmarshal([]byte(inbound.StreamSettings), &stream)
-	clients, _ := s.inboundService.GetClients(inbound)
+	rawClients, _ := s.inboundService.GetClients(inbound)
+	clients := expandClientsForSubscription(rawClients)
 
 	var settings map[string]any
 	json.Unmarshal([]byte(inbound.Settings), &settings)
@@ -913,7 +918,8 @@ func (s *SubService) genHysteriaLink(inbound *model.Inbound, email string) strin
 	}
 	var stream map[string]interface{}
 	json.Unmarshal([]byte(inbound.StreamSettings), &stream)
-	clients, _ := s.inboundService.GetClients(inbound)
+	rawClients, _ := s.inboundService.GetClients(inbound)
+	clients := expandClientsForSubscription(rawClients)
 	clientIndex := -1
 	for i, client := range clients {
 		if client.Email == email {
