@@ -1,14 +1,14 @@
 #!/bin/sh
 # ARCH = the fork's lowercase asset arch suffix (xray-linux-<ARCH>.zip)
 # FNAME = the local rename target the panel image bundles in build/bin
+# Only the three architectures we ship Xray-core fork releases for are
+# handled — i386/armv6 cases were dropped together with their docker.yml
+# / release.yml entries so the build fails fast if anyone passes an
+# unsupported TARGETARCH instead of silently falling back to amd64.
 case $1 in
     amd64)
         ARCH="amd64"
         FNAME="amd64"
-        ;;
-    i386)
-        ARCH="386"
-        FNAME="i386"
         ;;
     armv8 | arm64 | aarch64)
         ARCH="arm64"
@@ -18,13 +18,9 @@ case $1 in
         ARCH="armv7"
         FNAME="arm32"
         ;;
-    armv6)
-        ARCH="armv6"
-        FNAME="armv6"
-        ;;
     *)
-        ARCH="amd64"
-        FNAME="amd64"
+        echo "DockerInit: unsupported TARGETARCH=$1 (expected amd64/arm64/armv7)" >&2
+        exit 1
         ;;
 esac
 mkdir -p build/bin
