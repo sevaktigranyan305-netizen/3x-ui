@@ -53,11 +53,11 @@
 package service
 
 import (
-        "encoding/json"
-        "net/netip"
-        "sort"
+	"encoding/json"
+	"net/netip"
+	"sort"
 
-        "github.com/mhsanaei/3x-ui/v2/database/model"
+	"github.com/mhsanaei/3x-ui/v2/database/model"
 )
 
 // virtualnetAllowOutboundTag names the outbound the synthesised
@@ -88,30 +88,30 @@ const virtualnetAllowLoopback = "127.0.0.0/8"
 // same rule, so the routing whitelist stays in sync with what is
 // actually reachable.
 func collectVirtualnetSubnets(inbounds []*model.Inbound) []string {
-        seen := map[string]struct{}{}
-        for _, ib := range inbounds {
-                if ib == nil || !ib.Enable || ib.Protocol != model.VLESS {
-                        continue
-                }
-                pv, ok := parseVirtualnetInbound(ib)
-                if !ok {
-                        continue
-                }
-                prefix, err := netip.ParsePrefix(pv.Subnet)
-                if err != nil {
-                        continue
-                }
-                seen[prefix.String()] = struct{}{}
-        }
-        if len(seen) == 0 {
-                return nil
-        }
-        out := make([]string, 0, len(seen))
-        for s := range seen {
-                out = append(out, s)
-        }
-        sort.Strings(out)
-        return out
+	seen := map[string]struct{}{}
+	for _, ib := range inbounds {
+		if ib == nil || !ib.Enable || ib.Protocol != model.VLESS {
+			continue
+		}
+		pv, ok := parseVirtualnetInbound(ib)
+		if !ok {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(pv.Subnet)
+		if err != nil {
+			continue
+		}
+		seen[prefix.String()] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // injectVirtualnetAllowRule inserts a `→ direct` allow-rule keyed on
@@ -130,72 +130,72 @@ func collectVirtualnetSubnets(inbounds []*model.Inbound) []string {
 // nil to inject only the loopback whitelist (per the unconditional
 // injection contract).
 func injectVirtualnetAllowRule(routerCfg []byte, subnets []string) []byte {
-        if len(routerCfg) == 0 {
-                return routerCfg
-        }
-        var router map[string]any
-        if err := json.Unmarshal(routerCfg, &router); err != nil {
-                return routerCfg
-        }
+	if len(routerCfg) == 0 {
+		return routerCfg
+	}
+	var router map[string]any
+	if err := json.Unmarshal(routerCfg, &router); err != nil {
+		return routerCfg
+	}
 
-        ips := make([]any, 0, 1+len(subnets))
-        ips = append(ips, virtualnetAllowLoopback)
-        for _, s := range subnets {
-                ips = append(ips, s)
-        }
-        allowRule := map[string]any{
-                "type":        "field",
-                "outboundTag": virtualnetAllowOutboundTag,
-                "ip":          ips,
-        }
+	ips := make([]any, 0, 1+len(subnets))
+	ips = append(ips, virtualnetAllowLoopback)
+	for _, s := range subnets {
+		ips = append(ips, s)
+	}
+	allowRule := map[string]any{
+		"type":        "field",
+		"outboundTag": virtualnetAllowOutboundTag,
+		"ip":          ips,
+	}
 
-        rulesRaw, _ := router["rules"].([]any)
+	rulesRaw, _ := router["rules"].([]any)
 
-        // Idempotency: skip injection if a rule with the same IP set
-        // and the same outboundTag is already present. We look for an
-        // exact match on ip slice contents rather than just any
-        // overlap, because operator-authored allow-rules with a
-        // different (intentional) IP set should be left in place.
-        for _, rRaw := range rulesRaw {
-                r, ok := rRaw.(map[string]any)
-                if !ok {
-                        continue
-                }
-                if tag, _ := r["outboundTag"].(string); tag != virtualnetAllowOutboundTag {
-                        continue
-                }
-                if !ipSetsEqual(r["ip"], ips) {
-                        continue
-                }
-                // Already injected by earlier build pass; preserve byte-stable output
-                return routerCfg
-        }
+	// Idempotency: skip injection if a rule with the same IP set
+	// and the same outboundTag is already present. We look for an
+	// exact match on ip slice contents rather than just any
+	// overlap, because operator-authored allow-rules with a
+	// different (intentional) IP set should be left in place.
+	for _, rRaw := range rulesRaw {
+		r, ok := rRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if tag, _ := r["outboundTag"].(string); tag != virtualnetAllowOutboundTag {
+			continue
+		}
+		if !ipSetsEqual(r["ip"], ips) {
+			continue
+		}
+		// Already injected by earlier build pass; preserve byte-stable output
+		return routerCfg
+	}
 
-        // Insert just after the `api` inbound rule (if any) so we
-        // never shadow API access via the synthesised allow.
-        insertAt := 0
-        for i, rRaw := range rulesRaw {
-                r, ok := rRaw.(map[string]any)
-                if !ok {
-                        continue
-                }
-                if isAPIInboundRule(r) {
-                        insertAt = i + 1
-                }
-        }
+	// Insert just after the `api` inbound rule (if any) so we
+	// never shadow API access via the synthesised allow.
+	insertAt := 0
+	for i, rRaw := range rulesRaw {
+		r, ok := rRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if isAPIInboundRule(r) {
+			insertAt = i + 1
+		}
+	}
 
-        newRules := make([]any, 0, len(rulesRaw)+1)
-        newRules = append(newRules, rulesRaw[:insertAt]...)
-        newRules = append(newRules, allowRule)
-        newRules = append(newRules, rulesRaw[insertAt:]...)
-        router["rules"] = newRules
+	newRules := make([]any, 0, len(rulesRaw)+1)
+	newRules = append(newRules, rulesRaw[:insertAt]...)
+	newRules = append(newRules, allowRule)
+	newRules = append(newRules, rulesRaw[insertAt:]...)
+	router["rules"] = newRules
 
-        out, err := json.Marshal(router)
-        if err != nil {
-                // re-marshal cannot realistically fail; preserve original on error
-                return routerCfg
-        }
-        return out
+	out, err := json.Marshal(router)
+	if err != nil {
+		// re-marshal cannot realistically fail; preserve original on error
+		return routerCfg
+	}
+	return out
 }
 
 // isAPIInboundRule reports whether rule looks like the standard
@@ -203,16 +203,16 @@ func injectVirtualnetAllowRule(routerCfg []byte, subnets []string) []byte {
 // default xray template. We check only the inbound side because an
 // operator may have renamed the outbound tag.
 func isAPIInboundRule(rule map[string]any) bool {
-        tags, ok := rule["inboundTag"].([]any)
-        if !ok || len(tags) == 0 {
-                return false
-        }
-        for _, t := range tags {
-                if s, _ := t.(string); s == "api" {
-                        return true
-                }
-        }
-        return false
+	tags, ok := rule["inboundTag"].([]any)
+	if !ok || len(tags) == 0 {
+		return false
+	}
+	for _, t := range tags {
+		if s, _ := t.(string); s == "api" {
+			return true
+		}
+	}
+	return false
 }
 
 // ipSetsEqual compares two `ip` rule values for set equality. Both
@@ -220,26 +220,26 @@ func isAPIInboundRule(rule map[string]any) bool {
 // significant in xray rule files but not for our equality check
 // since the allow-rule is regenerated deterministically.
 func ipSetsEqual(a any, b []any) bool {
-        as, ok := a.([]any)
-        if !ok || len(as) != len(b) {
-                return false
-        }
-        am := map[string]struct{}{}
-        for _, v := range as {
-                s, ok := v.(string)
-                if !ok {
-                        return false
-                }
-                am[s] = struct{}{}
-        }
-        for _, v := range b {
-                s, ok := v.(string)
-                if !ok {
-                        return false
-                }
-                if _, hit := am[s]; !hit {
-                        return false
-                }
-        }
-        return true
+	as, ok := a.([]any)
+	if !ok || len(as) != len(b) {
+		return false
+	}
+	am := map[string]struct{}{}
+	for _, v := range as {
+		s, ok := v.(string)
+		if !ok {
+			return false
+		}
+		am[s] = struct{}{}
+	}
+	for _, v := range b {
+		s, ok := v.(string)
+		if !ok {
+			return false
+		}
+		if _, hit := am[s]; !hit {
+			return false
+		}
+	}
+	return true
 }
