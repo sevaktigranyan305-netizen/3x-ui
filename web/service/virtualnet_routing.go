@@ -146,8 +146,7 @@ func injectVirtualnetAllowRule(routerCfg []byte, subnets []string) []byte {
 		return routerCfg
 	}
 
-	ips := make([]any, 0, 1+len(subnets))
-	ips = append(ips, virtualnetAllowLoopback)
+	ips := []any{virtualnetAllowLoopback}
 	for _, s := range subnets {
 		ips = append(ips, s)
 	}
@@ -192,7 +191,7 @@ func injectVirtualnetAllowRule(routerCfg []byte, subnets []string) []byte {
 		}
 	}
 
-	newRules := make([]any, 0, len(rulesRaw)+1)
+	var newRules []any
 	newRules = append(newRules, rulesRaw[:insertAt]...)
 	newRules = append(newRules, allowRule)
 	newRules = append(newRules, rulesRaw[insertAt:]...)
