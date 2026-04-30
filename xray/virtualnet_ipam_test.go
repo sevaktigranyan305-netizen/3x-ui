@@ -165,6 +165,33 @@ func TestVirtualnetIPAMPath_SlugMatchesXrayCore(t *testing.T) {
 	}
 }
 
+func TestReconcileVirtualnetForInbounds_SharedSubnetAggregates(t *testing.T) {
+	withTempBin(t)
+	// Two VLESS inbounds, same subnet — the helper must aggregate
+	// their UUID sets before reconciling, otherwise reconciling
+	// inbound B would wipe inbound A's mappings.
+	parsed := []ParsedVirtualnetInbound{
+		{InboundID: 1, Enabled: true, Subnet: "10.0.0.0/24", UUIDs: []string{"a1", "a2"}},
+		{InboundID: 2, Enabled: true, Subnet: "10.0.0.0/24", UUIDs: []string{"b1", "b2"}},
+	}
+	out, err := ReconcileVirtualnetForInbounds(parsed)
+	if err != nil {
+		t.Fatalf("ReconcileVirtualnetForInbounds: %v", err)
+	}
+	got := out["10.0.0.0/24"]
+	for _, u := range []string{"a1", "a2", "b1", "b2"} {
+		if got[u] == "" {
+			t.Fatalf("uuid %q dropped after shared-subnet reconcile, snapshot=%+v", u, got)
+		}
+	}
+	// All four UUIDs should be in the persist file.
+	subnet := mustPrefix(t, "10.0.0.0/24")
+	reload, _ := LoadVirtualnetIPAM(subnet)
+	if got := reload.Snapshot(); len(got) != 4 {
+		t.Fatalf("persist file has %d mappings, want 4: %+v", len(got), got)
+	}
+}
+
 func TestReconcileVirtualnetForInbounds_AllocatesAndPersists(t *testing.T) {
 	withTempBin(t)
 	parsed := []ParsedVirtualnetInbound{

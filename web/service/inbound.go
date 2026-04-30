@@ -362,6 +362,11 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	defer func() {
 		if err == nil {
 			tx.Commit()
+			// Reconcile *after* commit so the IPAM file sees the
+			// just-saved inbound; reconcileVirtualnetIPAM reads
+			// through a separate connection (database.GetDB()) and
+			// would otherwise see stale pre-commit state.
+			s.reconcileVirtualnetIPAM()
 		} else {
 			tx.Rollback()
 		}
@@ -396,7 +401,6 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 		s.xrayApi.Close()
 	}
 
-	s.reconcileVirtualnetIPAM()
 	return inbound, needRestart, err
 }
 
@@ -486,6 +490,11 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 			tx.Rollback()
 		} else {
 			tx.Commit()
+			// Reconcile *after* commit so the IPAM file sees the
+			// just-saved settings; reconcileVirtualnetIPAM reads
+			// through a separate connection and would otherwise
+			// see stale pre-commit state.
+			s.reconcileVirtualnetIPAM()
 		}
 	}()
 
@@ -600,9 +609,8 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 	s.xrayApi.Close()
 
-	saveErr := tx.Save(oldInbound).Error
-	s.reconcileVirtualnetIPAM()
-	return inbound, needRestart, saveErr
+	err = tx.Save(oldInbound).Error
+	return inbound, needRestart, err
 }
 
 func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.Inbound) (*model.Inbound, error) {
@@ -800,6 +808,11 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 			tx.Rollback()
 		} else {
 			tx.Commit()
+			// Reconcile *after* commit so the IPAM file sees the
+			// just-saved client; reconcileVirtualnetIPAM reads
+			// through a separate connection and would otherwise
+			// see stale pre-commit state.
+			s.reconcileVirtualnetIPAM()
 		}
 	}()
 
@@ -854,9 +867,8 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	}
 	s.xrayApi.Close()
 
-	saveErr := tx.Save(oldInbound).Error
-	s.reconcileVirtualnetIPAM()
-	return needRestart, saveErr
+	err = tx.Save(oldInbound).Error
+	return needRestart, err
 }
 
 func (s *InboundService) getClientPrimaryKey(protocol model.Protocol, client model.Client) string {
@@ -1289,6 +1301,11 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 			tx.Rollback()
 		} else {
 			tx.Commit()
+			// Reconcile *after* commit so the IPAM file sees the
+			// just-saved client; reconcileVirtualnetIPAM reads
+			// through a separate connection and would otherwise
+			// see stale pre-commit state.
+			s.reconcileVirtualnetIPAM()
 		}
 	}()
 
@@ -1474,9 +1491,8 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	if deviceStatChanged {
 		logger.Debugf("device set changed for client %s: added=%d, removed=%d", clients[0].Email, len(addedDevices), len(removedDeviceEmails))
 	}
-	saveErr := tx.Save(oldInbound).Error
-	s.reconcileVirtualnetIPAM()
-	return needRestart, saveErr
+	err = tx.Save(oldInbound).Error
+	return needRestart, err
 }
 
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (error, bool) {

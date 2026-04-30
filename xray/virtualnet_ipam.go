@@ -360,7 +360,18 @@ func ipamHostMask(hostBits int) uint32 {
 // Returns a per-subnet map of (uuid -> ip) for callers (typically
 // link-generation paths) that want to skip a second file read.
 func ReconcileVirtualnetForInbounds(parsedInbounds []ParsedVirtualnetInbound) (map[string]map[string]string, error) {
-	out := map[string]map[string]string{}
+	// Group by canonical subnet string before touching disk: when two
+	// inbounds share a subnet they share an IPAM file, and reconciling
+	// each inbound in isolation would drop every other inbound's
+	// UUIDs (Reconcile keeps only the UUIDs in its argument list).
+	// Aggregate first, write once.
+	type group struct {
+		subnet     netip.Prefix
+		uuids      []string
+		seenUUIDs  map[string]struct{}
+		inboundIDs []int
+	}
+	groups := map[string]*group{}
 	for _, ib := range parsedInbounds {
 		if !ib.Enabled {
 			continue
@@ -369,26 +380,50 @@ func ReconcileVirtualnetForInbounds(parsedInbounds []ParsedVirtualnetInbound) (m
 		if err != nil {
 			return nil, fmt.Errorf("virtualnet ipam: inbound %d invalid subnet %q: %w", ib.InboundID, ib.Subnet, err)
 		}
-		path := VirtualnetIPAMPath(subnet)
+		key := subnet.String()
+		g, ok := groups[key]
+		if !ok {
+			g = &group{
+				subnet:    subnet,
+				seenUUIDs: map[string]struct{}{},
+			}
+			groups[key] = g
+		}
+		g.inboundIDs = append(g.inboundIDs, ib.InboundID)
+		for _, u := range ib.UUIDs {
+			if u == "" {
+				continue
+			}
+			if _, dup := g.seenUUIDs[u]; dup {
+				continue
+			}
+			g.seenUUIDs[u] = struct{}{}
+			g.uuids = append(g.uuids, u)
+		}
+	}
+
+	out := map[string]map[string]string{}
+	for key, g := range groups {
+		path := VirtualnetIPAMPath(g.subnet)
 		mu := ipamLockFor(path)
 		mu.Lock()
-		ipam, err := LoadVirtualnetIPAM(subnet)
+		ipam, err := LoadVirtualnetIPAM(g.subnet)
 		if err != nil {
 			mu.Unlock()
 			return nil, fmt.Errorf("virtualnet ipam: load %s: %w", path, err)
 		}
-		ipam.Reconcile(ib.UUIDs)
-		for _, u := range ib.UUIDs {
+		ipam.Reconcile(g.uuids)
+		for _, u := range g.uuids {
 			if _, alloc := ipam.Allocate(u); alloc != nil {
 				mu.Unlock()
-				return nil, fmt.Errorf("virtualnet ipam: allocate for inbound %d uuid %s: %w", ib.InboundID, u, alloc)
+				return nil, fmt.Errorf("virtualnet ipam: allocate for subnet %s uuid %s (inbounds %v): %w", key, u, g.inboundIDs, alloc)
 			}
 		}
 		if err := ipam.Save(); err != nil {
 			mu.Unlock()
 			return nil, fmt.Errorf("virtualnet ipam: save %s: %w", path, err)
 		}
-		out[subnet.String()] = ipam.Snapshot()
+		out[key] = ipam.Snapshot()
 		mu.Unlock()
 	}
 	return out, nil
