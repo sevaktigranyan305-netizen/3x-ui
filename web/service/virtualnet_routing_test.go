@@ -276,6 +276,19 @@ func TestInjectVirtualnetAllowRule_EmptyAndMalformedSurviveUnchanged(t *testing.
 	if got := injectVirtualnetAllowRule(bad, nil, []string{"inbound-1"}); string(got) != string(bad) {
 		t.Errorf("malformed input must round-trip unchanged, got %s", string(got))
 	}
+	// JSON `null` -> returned as-is, NOT a panic. json.Unmarshal of
+	// `null` into a map sets it to nil without an error, and writing
+	// to a nil map panics.
+	nullCfg := []byte("null")
+	if got := injectVirtualnetAllowRule(nullCfg, []string{"10.0.0.0/24"}, []string{"inbound-1"}); string(got) != string(nullCfg) {
+		t.Errorf("null router cfg must round-trip unchanged, got %s", string(got))
+	}
+	// Object without a rules field -> returned as-is (no rules to
+	// splice into and no panic from a write to a populated map).
+	noRules := []byte(`{}`)
+	if got := injectVirtualnetAllowRule(noRules, []string{"10.0.0.0/24"}, []string{"inbound-1"}); !json.Valid(got) {
+		t.Errorf("object without rules must remain valid JSON, got %s", string(got))
+	}
 }
 
 // mustMarshal serialises v to JSON or fails the test. Helper kept

@@ -190,6 +190,13 @@ func injectVirtualnetAllowRule(routerCfg []byte, subnets []string, inboundTags [
 	if err := json.Unmarshal(routerCfg, &router); err != nil {
 		return routerCfg
 	}
+	// JSON literal `null` unmarshals to a nil map without an error;
+	// writing to it later would panic with "assignment to entry in
+	// nil map". Treat that case the same as a malformed router
+	// config and leave the original bytes untouched.
+	if router == nil {
+		return routerCfg
+	}
 
 	ips := []any{virtualnetAllowLoopback}
 	for _, s := range subnets {
