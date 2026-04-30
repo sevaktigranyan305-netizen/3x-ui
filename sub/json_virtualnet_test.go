@@ -72,6 +72,49 @@ func TestGenVless_VirtualNetworkNestedInSettings(t *testing.T) {
 	}
 }
 
+// When the inbound has virtualNetwork.enabled = true but no explicit
+// subnet, the JSON subscription must still emit subnet = 10.0.0.0/24 so
+// it stays in lock-step with subService.go::genVlessLink, which appends
+// vnetSubnet=10.0.0.0/24 in the same situation. Otherwise a JSON-sub
+// consumer would get a virtualNetwork block without a subnet field and
+// have to hardcode the default itself.
+func TestGenVless_VirtualNetworkDefaultSubnet(t *testing.T) {
+	dir := t.TempDir()
+	prev := os.Getenv("XUI_BIN_FOLDER")
+	os.Setenv("XUI_BIN_FOLDER", dir)
+	t.Cleanup(func() { os.Setenv("XUI_BIN_FOLDER", prev) })
+
+	inbound := &model.Inbound{
+		Protocol: model.VLESS,
+		Listen:   "1.2.3.4",
+		Port:     443,
+		Settings: `{
+			"clients": [{"id": "c-uuid"}],
+			"virtualNetwork": {"enabled": true}
+		}`,
+	}
+	client := model.Client{ID: "c-uuid", Email: "alice"}
+
+	s := &SubJsonService{}
+	raw := s.genVless(inbound, json_util.RawMessage(`{}`), client)
+
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v\nraw: %s", err, raw)
+	}
+	settings, ok := got["settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings missing: %s", raw)
+	}
+	vnet, ok := settings["virtualNetwork"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings.virtualNetwork missing: %s", raw)
+	}
+	if subnet, _ := vnet["subnet"].(string); subnet != "10.0.0.0/24" {
+		t.Fatalf("subnet = %q, want 10.0.0.0/24 (default)", subnet)
+	}
+}
+
 // virtualNetwork.enabled = false must produce no virtualNetwork block at
 // all so legacy clients (that do not understand the L3 fork) see a plain
 // VLESS outbound.

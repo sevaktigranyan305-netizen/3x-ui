@@ -383,11 +383,17 @@ func (s *SubJsonService) genVless(inbound *model.Inbound, streamSettings json_ut
 				"enabled":      true,
 				"defaultRoute": true,
 			}
-			subnetStr := ""
+			// Mirror subService.go::genVlessLink: when the inbound has no
+			// explicit subnet, fall back to 10.0.0.0/24 — and emit it so
+			// the client always knows which CIDR to configure on its TUN
+			// interface. Otherwise a JSON-sub consumer would get a
+			// virtualNetwork block without a subnet field and have to
+			// hardcode the same default itself.
+			subnetStr := "10.0.0.0/24"
 			if subnet, ok := vnetRaw["subnet"].(string); ok && subnet != "" {
-				vnetOut["subnet"] = subnet
 				subnetStr = subnet
 			}
+			vnetOut["subnet"] = subnetStr
 			// Mirror the share-link's vnetIp= (subService.go:genVlessLink)
 			// so Android clients can configure VpnService.Builder before
 			// xray sees the file descriptor.
