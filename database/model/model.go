@@ -66,6 +66,14 @@ type Inbound struct {
 	StreamSettings string   `json:"streamSettings" form:"streamSettings"`
 	Tag            string   `json:"tag" form:"tag" gorm:"unique"`
 	Sniffing       string   `json:"sniffing" form:"sniffing"`
+
+	// VirtualnetAssignments is a (uuid -> ip) snapshot of the panel's
+	// IPAM allocation for this inbound's L3 virtualNetwork. Populated
+	// at API-response time only (gorm:"-" so it never touches the DB)
+	// so the panel UI's link generator can append &vnetIp= to the
+	// VLESS link it shows in the "view link" / QR modals. Empty when
+	// the inbound is not VLESS or virtualNetwork is disabled.
+	VirtualnetAssignments map[string]string `json:"virtualNetworkAssignments,omitempty" gorm:"-"`
 }
 
 // OutboundTraffics tracks traffic statistics for Xray outbound connections.

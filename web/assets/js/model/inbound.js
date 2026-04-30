@@ -1713,6 +1713,15 @@ class Inbound extends XrayCommonClass {
             // The exported client config always defaults the route through the
             // tunnel (matches the example in the xray-core fork README).
             params.set("vnetDefaultRoute", "1");
+            // Pre-allocated per-uuid IP from the panel's IPAM (mirrors the
+            // server-side IPAM file). Required on Android because v2rayNG
+            // configures the TUN address before xray sees the file
+            // descriptor; with vnetIp the client knows the address up
+            // front instead of waiting for the server preamble.
+            const assignments = this.virtualNetworkAssignments || (this._owner && this._owner.virtualNetworkAssignments);
+            if (assignments && clientId && assignments[clientId]) {
+                params.set("vnetIp", assignments[clientId]);
+            }
         }
 
         const link = `vless://${uuid}@${address}:${port}`;

@@ -496,6 +496,31 @@ func (s *SubService) genVlessLink(inbound *model.Inbound, email string) string {
 		params["security"] = "none"
 	}
 
+	// Forked xray-core feature: when the inbound has the L3 virtual
+	// network enabled, advertise it on the client link so v2rayNG /
+	// v2rayN bring up their TUN interface and route traffic through
+	// it. The pre-allocated per-uuid IP from the panel's IPAM is
+	// embedded as &vnetIp= so the client can configure VpnService /
+	// utun / tun before the VLESS handshake completes — required on
+	// Android, where the address must be set before the file
+	// descriptor is established.
+	if vnet, ok := settings["virtualNetwork"].(map[string]any); ok {
+		if enabled, _ := vnet["enabled"].(bool); enabled {
+			params["vnet"] = "1"
+			subnetStr := "10.0.0.0/24"
+			if v, ok := vnet["subnet"].(string); ok && v != "" {
+				params["vnetSubnet"] = v
+				subnetStr = v
+			} else {
+				params["vnetSubnet"] = subnetStr
+			}
+			params["vnetDefaultRoute"] = "1"
+			if ip := service.LookupVirtualnetIP(subnetStr, uuid); ip != "" {
+				params["vnetIp"] = ip
+			}
+		}
+	}
+
 	externalProxies, _ := stream["externalProxy"].([]any)
 
 	if len(externalProxies) > 0 {

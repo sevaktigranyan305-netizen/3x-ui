@@ -44,6 +44,7 @@ func (s *InboundService) GetInbounds(userId int) ([]*model.Inbound, error) {
 	}
 	// Enrich client stats with UUID/SubId from inbound settings
 	for _, inbound := range inbounds {
+		AnnotateVirtualnetAssignments(inbound)
 		clients, _ := s.GetClients(inbound)
 		if len(clients) == 0 || len(inbound.ClientStats) == 0 {
 			continue
@@ -395,6 +396,7 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 		s.xrayApi.Close()
 	}
 
+	s.reconcileVirtualnetIPAM()
 	return inbound, needRestart, err
 }
 
@@ -441,7 +443,9 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 		}
 	}
 
-	return needRestart, db.Delete(model.Inbound{}, id).Error
+	delErr := db.Delete(model.Inbound{}, id).Error
+	s.reconcileVirtualnetIPAM()
+	return needRestart, delErr
 }
 
 func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
@@ -451,6 +455,7 @@ func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
 	if err != nil {
 		return nil, err
 	}
+	AnnotateVirtualnetAssignments(inbound)
 	return inbound, nil
 }
 
@@ -595,7 +600,9 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 	s.xrayApi.Close()
 
-	return inbound, needRestart, tx.Save(oldInbound).Error
+	saveErr := tx.Save(oldInbound).Error
+	s.reconcileVirtualnetIPAM()
+	return inbound, needRestart, saveErr
 }
 
 func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.Inbound) (*model.Inbound, error) {
@@ -847,7 +854,9 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	}
 	s.xrayApi.Close()
 
-	return needRestart, tx.Save(oldInbound).Error
+	saveErr := tx.Save(oldInbound).Error
+	s.reconcileVirtualnetIPAM()
+	return needRestart, saveErr
 }
 
 func (s *InboundService) getClientPrimaryKey(protocol model.Protocol, client model.Client) string {
@@ -1167,7 +1176,9 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 			s.xrayApi.Close()
 		}
 	}
-	return needRestart, db.Save(oldInbound).Error
+	saveErr := db.Save(oldInbound).Error
+	s.reconcileVirtualnetIPAM()
+	return needRestart, saveErr
 }
 
 func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId string) (bool, error) {
@@ -1463,7 +1474,9 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	if deviceStatChanged {
 		logger.Debugf("device set changed for client %s: added=%d, removed=%d", clients[0].Email, len(addedDevices), len(removedDeviceEmails))
 	}
-	return needRestart, tx.Save(oldInbound).Error
+	saveErr := tx.Save(oldInbound).Error
+	s.reconcileVirtualnetIPAM()
+	return needRestart, saveErr
 }
 
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (error, bool) {

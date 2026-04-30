@@ -127,6 +127,13 @@ class DBInbound {
         };
 
         this._cachedInbound = Inbound.fromJson(config);
+        // Pass through the panel's IPAM allocations (uuid -> ip) so the
+        // VLESS link generator can append &vnetIp= for the L3 virtual
+        // network feature. Always defined on the response (possibly
+        // empty); copy verbatim instead of cherry-picking.
+        if (this.virtualNetworkAssignments) {
+            this._cachedInbound.virtualNetworkAssignments = this.virtualNetworkAssignments;
+        }
         return this._cachedInbound;
     }
 
