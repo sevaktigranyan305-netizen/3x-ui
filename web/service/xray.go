@@ -378,10 +378,13 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	// virtualnet subnet → direct) ahead of the default
 	// `geoip:private → blocked` antipivot rule so gateway-IP rewrites
 	// and intra-tunnel traffic are not silently sent to the
-	// blackhole. Runs unconditionally per design — see
-	// virtualnet_routing.go for rationale.
-	if injected := injectVirtualnetAllowRule(xrayConfig.RouterConfig, collectVirtualnetSubnets(inbounds)); len(injected) > 0 {
-		xrayConfig.RouterConfig = injected
+	// blackhole. Gated on at least one virtualnet inbound being
+	// active so non-virtualnet deployments retain full antipivot
+	// protection — see virtualnet_routing.go for rationale.
+	if subnets := collectVirtualnetSubnets(inbounds); len(subnets) > 0 {
+		if injected := injectVirtualnetAllowRule(xrayConfig.RouterConfig, subnets); len(injected) > 0 {
+			xrayConfig.RouterConfig = injected
+		}
 	}
 
 	return xrayConfig, nil

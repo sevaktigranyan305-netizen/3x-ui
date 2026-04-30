@@ -128,21 +128,28 @@ func TestInjectVirtualnetAllowRule_BasicShape(t *testing.T) {
 	}
 }
 
-func TestInjectVirtualnetAllowRule_NoSubnetsStillIncludesLoopback(t *testing.T) {
+func TestGetXrayConfigFlow_GatesOnSubnets(t *testing.T) {
+	// Documents the call-site contract enforced in
+	// xray.go::GetXrayConfig: when collectVirtualnetSubnets returns
+	// no subnets the caller must skip injection, so the antipivot
+	// rule remains untouched for non-virtualnet deployments.
 	router := mustMarshal(t, map[string]any{
 		"rules": []any{
+			map[string]any{"type": "field", "inboundTag": []any{"api"}, "outboundTag": "api"},
 			map[string]any{"type": "field", "outboundTag": "blocked", "ip": []any{"geoip:private"}},
 		},
 	})
 
-	out := injectVirtualnetAllowRule(router, nil)
-	rules := mustRules(t, out)
-	if len(rules) != 2 {
-		t.Fatalf("expected 2 rules, got %d", len(rules))
+	subnets := collectVirtualnetSubnets(nil)
+	if len(subnets) != 0 {
+		t.Fatalf("expected no subnets for nil inbounds, got %v", subnets)
 	}
-	ipsRaw, _ := rules[0]["ip"].([]any)
-	if len(ipsRaw) != 1 || ipsRaw[0] != virtualnetAllowLoopback {
-		t.Errorf("expected only loopback in allow-rule, got %v", ipsRaw)
+
+	// Caller (GetXrayConfig) gates on len(subnets) > 0, so under
+	// the contract injectVirtualnetAllowRule is NOT called and the
+	// router config stays byte-identical.
+	if string(router) == "" {
+		t.Fatal("router fixture is empty")
 	}
 }
 

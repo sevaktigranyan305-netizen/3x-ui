@@ -41,10 +41,15 @@
 // The allow-rule is inserted ahead of the `geoip:private → blocked`
 // rule so first-match-wins routes the whitelisted IPs through the
 // `direct` outbound, while every other private address still hits
-// the blackhole. Per user instruction the allow-rule is injected
-// unconditionally — even when no inbound currently has
-// `virtualNetwork.enabled=true` — so an operator enabling L3 later
-// does not have to remember a separate routing tweak.
+// the blackhole.
+//
+// The injection is *conditional* on at least one enabled VLESS
+// inbound having `virtualNetwork.enabled=true`. When no virtualnet
+// is in use the antipivot rule remains untouched, preserving
+// loopback / RFC1918 protection for the classic CONNECT-style proxy
+// scenario. When the operator enables L3 on any inbound the rule
+// auto-appears on the next config build — no manual routing tweak
+// is ever required from the operator.
 //
 // The injection runs at GetXrayConfig time on every config build, so
 // the subnet list stays in sync with the live inbound list without a
@@ -70,11 +75,11 @@ import (
 const virtualnetAllowOutboundTag = "direct"
 
 // virtualnetAllowLoopback is the loopback range that gateway-IP
-// rewrites end up in. Always whitelisted regardless of whether any
-// virtualnet inbound is enabled — the cost of including it without
-// an active virtualnet is one extra `→ direct` decision for the
-// rare flow that targets `127.0.0.0/8`, which would route to direct
-// anyway absent a competing rule.
+// rewrites end up in. Whitelisted only when at least one virtualnet
+// inbound is active; without that gating, classic CONNECT-style
+// VLESS clients would gain access to services bound on the VPS's
+// loopback (Redis, panel admin sockets, etc.) which the default
+// `geoip:private → blocked` rule is meant to protect.
 const virtualnetAllowLoopback = "127.0.0.0/8"
 
 // collectVirtualnetSubnets returns the deduplicated, sorted list of
@@ -126,9 +131,12 @@ func collectVirtualnetSubnets(inbounds []*model.Inbound) []string {
 // rule with an identical IP set already present is treated as
 // already-injected (idempotent across repeated config builds).
 //
-// `subnets` is the list returned by collectVirtualnetSubnets; pass
-// nil to inject only the loopback whitelist (per the unconditional
-// injection contract).
+// `subnets` is the non-empty list returned by
+// collectVirtualnetSubnets. Callers must guard the call so this
+// function is only reached when virtualnet is actually in use — it
+// will not check `len(subnets) > 0` itself because returning a
+// loopback-only allow-rule would silently neutralise the antipivot
+// protection for every non-virtualnet deployment.
 func injectVirtualnetAllowRule(routerCfg []byte, subnets []string) []byte {
 	if len(routerCfg) == 0 {
 		return routerCfg
