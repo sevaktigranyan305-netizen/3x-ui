@@ -361,7 +361,7 @@ func (s *SubJsonService) genVless(inbound *model.Inbound, streamSettings json_ut
 		"users":   []any{user},
 	}
 
-	outbound.Settings = map[string]any{
+	settings := map[string]any{
 		"vnext": []any{vnext},
 	}
 
@@ -370,18 +370,41 @@ func (s *SubJsonService) genVless(inbound *model.Inbound, streamSettings json_ut
 	// brings up its TUN interface against the same subnet. defaultRoute
 	// is forced to true so all traffic goes through the tunnel — matches
 	// the example in the xray-core fork README.
+	//
+	// The xray-core JSON parser (infra/conf/vless.go: VLessOutboundConfig)
+	// expects virtualNetwork as a sibling of vnext under settings, NOT at
+	// the top level of the outbound. Earlier revisions emitted it as a
+	// peer of settings; the parser silently ignored it and the client
+	// never saw the L3 hint. Keep this nested so the JSON subscription
+	// matches the share-link path generated in subService.go.
 	if vnetRaw, ok := inboundSettings["virtualNetwork"].(map[string]any); ok {
 		if enabled, _ := vnetRaw["enabled"].(bool); enabled {
 			vnetOut := map[string]any{
 				"enabled":      true,
 				"defaultRoute": true,
 			}
+			// Mirror subService.go::genVlessLink: when the inbound has no
+			// explicit subnet, fall back to 10.0.0.0/24 — and emit it so
+			// the client always knows which CIDR to configure on its TUN
+			// interface. Otherwise a JSON-sub consumer would get a
+			// virtualNetwork block without a subnet field and have to
+			// hardcode the same default itself.
+			subnetStr := "10.0.0.0/24"
 			if subnet, ok := vnetRaw["subnet"].(string); ok && subnet != "" {
-				vnetOut["subnet"] = subnet
+				subnetStr = subnet
 			}
-			outbound.VirtualNetwork = vnetOut
+			vnetOut["subnet"] = subnetStr
+			// Mirror the share-link's vnetIp= (subService.go:genVlessLink)
+			// so Android clients can configure VpnService.Builder before
+			// xray sees the file descriptor.
+			if ip := service.LookupVirtualnetIP(subnetStr, client.ID); ip != "" {
+				vnetOut["vnetIp"] = ip
+			}
+			settings["virtualNetwork"] = vnetOut
 		}
 	}
+
+	outbound.Settings = settings
 
 	result, _ := json.MarshalIndent(outbound, "", "  ")
 	return result
@@ -475,11 +498,6 @@ type Outbound struct {
 	StreamSettings json_util.RawMessage `json:"streamSettings"`
 	Mux            json_util.RawMessage `json:"mux,omitempty"`
 	Settings       map[string]any       `json:"settings,omitempty"`
-	// VirtualNetwork is the client-side L3 virtual network block consumed
-	// by the forked xray-core (sevaktigranyan305-netizen/Xray-core). It is
-	// only populated for VLESS outbounds when the matching inbound has
-	// virtualNetwork.enabled = true.
-	VirtualNetwork map[string]any `json:"virtualNetwork,omitempty"`
 }
 
 type VnextSetting struct {
