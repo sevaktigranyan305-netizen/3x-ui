@@ -84,18 +84,20 @@ const virtualnetAllowLoopback = "127.0.0.0/8"
 
 // collectVirtualnetSubnets returns the deduplicated, sorted list of
 // CIDR strings used by every enabled VLESS inbound that has
-// `virtualNetwork.enabled=true`. The format is canonical
-// `netip.Prefix.String()` so the entries match xray-core's IPAM
-// keying byte-for-byte.
+// `virtualNetwork.enabled=true` and a non-empty xray Tag. The format
+// is canonical `netip.Prefix.String()` so the entries match
+// xray-core's IPAM keying byte-for-byte.
 //
-// Disabled inbounds and inbounds with malformed virtualNetwork
-// blocks are silently skipped — link generation and IPAM follow the
-// same rule, so the routing whitelist stays in sync with what is
-// actually reachable.
+// Disabled inbounds, inbounds with malformed virtualNetwork blocks,
+// and inbounds without an xray Tag are silently skipped. The Tag
+// gate matters because the synthesised allow-rule is scoped via
+// `inboundTag` (see collectVirtualnetInboundTags) — a virtualnet
+// inbound without a tag could not be addressed by the rule anyway,
+// so its subnet must not appear either.
 func collectVirtualnetSubnets(inbounds []*model.Inbound) []string {
 	seen := map[string]struct{}{}
 	for _, ib := range inbounds {
-		if ib == nil || !ib.Enable || ib.Protocol != model.VLESS {
+		if ib == nil || !ib.Enable || ib.Protocol != model.VLESS || ib.Tag == "" {
 			continue
 		}
 		pv, ok := parseVirtualnetInbound(ib)
@@ -119,26 +121,69 @@ func collectVirtualnetSubnets(inbounds []*model.Inbound) []string {
 	return out
 }
 
+// collectVirtualnetInboundTags returns the deduplicated, sorted list
+// of xray inbound tags for every enabled VLESS inbound that has
+// `virtualNetwork.enabled=true`. The synthesised allow-rule is
+// scoped to these tags via `inboundTag` so the loopback whitelist
+// only applies to traffic arriving on virtualnet inbounds and
+// classic CONNECT-style inbounds (VMess / non-virtualnet VLESS)
+// continue to be governed by the antipivot rule.
+//
+// Inbounds without a Tag are skipped — collectVirtualnetSubnets
+// applies the same gate so the two slices are consistent.
+func collectVirtualnetInboundTags(inbounds []*model.Inbound) []string {
+	seen := map[string]struct{}{}
+	for _, ib := range inbounds {
+		if ib == nil || !ib.Enable || ib.Protocol != model.VLESS || ib.Tag == "" {
+			continue
+		}
+		if _, ok := parseVirtualnetInbound(ib); !ok {
+			continue
+		}
+		seen[ib.Tag] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // injectVirtualnetAllowRule inserts a `→ direct` allow-rule keyed on
 // the loopback range plus every virtualnet subnet into the routing
-// rules array of the parsed router config. The new rule is placed
-// immediately after the `api` inbound rule (if present) so it does
-// not shadow API routing, and it is guaranteed to land before any
+// rules array of the parsed router config, scoped via `inboundTag`
+// to virtualnet inbounds only. The new rule is placed immediately
+// after the `api` inbound rule (if present) so it does not shadow
+// API routing, and it is guaranteed to land before any
 // `geoip:private` rule that would otherwise blackhole the same IPs.
+//
+// The `inboundTag` scoping is critical: without it the allow-rule
+// would match traffic from every inbound on the server, so a
+// classic CONNECT-style VMess client could request `127.0.0.1:6379`
+// and be routed to direct (the exact attack the antipivot rule
+// protects against). With the tag list, only traffic that arrived
+// on a virtualnet inbound benefits from the loopback whitelist;
+// non-virtualnet inbounds keep falling through to
+// `geoip:private → blocked`.
 //
 // The function is conservative: a missing/non-object routing config
 // is returned as-is, parsing failures fall through unchanged, and a
 // rule with an identical IP set already present is treated as
 // already-injected (idempotent across repeated config builds).
 //
-// `subnets` is the non-empty list returned by
-// collectVirtualnetSubnets. Callers must guard the call so this
-// function is only reached when virtualnet is actually in use — it
-// will not check `len(subnets) > 0` itself because returning a
-// loopback-only allow-rule would silently neutralise the antipivot
-// protection for every non-virtualnet deployment.
-func injectVirtualnetAllowRule(routerCfg []byte, subnets []string) []byte {
-	if len(routerCfg) == 0 {
+// `subnets` and `inboundTags` are the non-empty lists returned by
+// collectVirtualnetSubnets / collectVirtualnetInboundTags. Callers
+// must guard the call so this function is only reached when
+// virtualnet is actually in use — it will not check
+// `len(subnets) > 0` / `len(inboundTags) > 0` itself because
+// returning a loopback-only or unscoped allow-rule would silently
+// neutralise the antipivot protection.
+func injectVirtualnetAllowRule(routerCfg []byte, subnets []string, inboundTags []string) []byte {
+	if len(routerCfg) == 0 || len(inboundTags) == 0 {
 		return routerCfg
 	}
 	var router map[string]any
@@ -150,9 +195,14 @@ func injectVirtualnetAllowRule(routerCfg []byte, subnets []string) []byte {
 	for _, s := range subnets {
 		ips = append(ips, s)
 	}
+	tags := make([]any, 0, len(inboundTags))
+	for _, t := range inboundTags {
+		tags = append(tags, t)
+	}
 	allowRule := map[string]any{
 		"type":        "field",
 		"outboundTag": virtualnetAllowOutboundTag,
+		"inboundTag":  tags,
 		"ip":          ips,
 	}
 
@@ -172,6 +222,9 @@ func injectVirtualnetAllowRule(routerCfg []byte, subnets []string) []byte {
 			continue
 		}
 		if !ipSetsEqual(r["ip"], ips) {
+			continue
+		}
+		if !ipSetsEqual(r["inboundTag"], tags) {
 			continue
 		}
 		// Already injected by earlier build pass; preserve byte-stable output

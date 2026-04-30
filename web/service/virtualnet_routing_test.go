@@ -15,6 +15,7 @@ func TestCollectVirtualnetSubnets(t *testing.T) {
 			Id:       id,
 			Enable:   enabled,
 			Protocol: model.VLESS,
+			Tag:      "inbound-test",
 			Settings: settings,
 		}
 	}
@@ -94,7 +95,7 @@ func TestInjectVirtualnetAllowRule_BasicShape(t *testing.T) {
 		},
 	})
 
-	out := injectVirtualnetAllowRule(router, []string{"10.0.0.0/24"})
+	out := injectVirtualnetAllowRule(router, []string{"10.0.0.0/24"}, []string{"inbound-1"})
 	rules := mustRules(t, out)
 
 	if len(rules) != 3 {
@@ -126,13 +127,72 @@ func TestInjectVirtualnetAllowRule_BasicShape(t *testing.T) {
 	if !ipSet["10.0.0.0/24"] {
 		t.Errorf("allow-rule missing virtualnet subnet 10.0.0.0/24: %v", ipsRaw)
 	}
+
+	// Allow-rule MUST be scoped to the supplied virtualnet inbound
+	// tags only — otherwise non-virtualnet inbounds on the same
+	// server would also benefit from the loopback whitelist.
+	tagsRaw, _ := rules[1]["inboundTag"].([]any)
+	tagSet := map[string]bool{}
+	for _, v := range tagsRaw {
+		if s, ok := v.(string); ok {
+			tagSet[s] = true
+		}
+	}
+	if !tagSet["inbound-1"] {
+		t.Errorf("allow-rule missing inboundTag scoping: %v", tagsRaw)
+	}
+}
+
+func TestCollectVirtualnetInboundTags(t *testing.T) {
+	mk := func(id int, enabled bool, tag, settings string) *model.Inbound {
+		return &model.Inbound{
+			Id:       id,
+			Enable:   enabled,
+			Protocol: model.VLESS,
+			Tag:      tag,
+			Settings: settings,
+		}
+	}
+
+	inbounds := []*model.Inbound{
+		// virtualnet inbound with tag
+		mk(1, true, "inbound-1", `{"clients":[],"virtualNetwork":{"enabled":true,"subnet":"10.0.0.0/24"}}`),
+		// virtualnet inbound without tag (skipped)
+		mk(2, true, "", `{"clients":[],"virtualNetwork":{"enabled":true,"subnet":"10.1.0.0/24"}}`),
+		// disabled (skipped)
+		mk(3, false, "inbound-3", `{"clients":[],"virtualNetwork":{"enabled":true,"subnet":"10.2.0.0/24"}}`),
+		// non-virtualnet (skipped)
+		mk(4, true, "inbound-4", `{"clients":[]}`),
+		// duplicate tag value (deduped)
+		mk(5, true, "inbound-1", `{"clients":[],"virtualNetwork":{"enabled":true,"subnet":"10.3.0.0/24"}}`),
+		// second valid virtualnet inbound
+		mk(6, true, "inbound-6", `{"clients":[],"virtualNetwork":{"enabled":true,"subnet":"10.4.0.0/24"}}`),
+	}
+
+	got := collectVirtualnetInboundTags(inbounds)
+	want := []string{"inbound-1", "inbound-6"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	// Subnets collected with the same gating: tagless inbound (id=2)
+	// must NOT contribute its subnet, otherwise the allow-rule would
+	// whitelist a CIDR that no inboundTag entry could match.
+	subnets := collectVirtualnetSubnets(inbounds)
+	for _, s := range subnets {
+		if s == "10.1.0.0/24" {
+			t.Errorf("subnet from tagless inbound leaked into list: %v", subnets)
+		}
+	}
 }
 
 func TestGetXrayConfigFlow_GatesOnSubnets(t *testing.T) {
 	// Documents the call-site contract enforced in
 	// xray.go::GetXrayConfig: when collectVirtualnetSubnets returns
-	// no subnets the caller must skip injection, so the antipivot
-	// rule remains untouched for non-virtualnet deployments.
+	// no subnets (and therefore collectVirtualnetInboundTags also
+	// returns nothing) the caller must skip injection, so the
+	// antipivot rule remains untouched for non-virtualnet
+	// deployments.
 	router := mustMarshal(t, map[string]any{
 		"rules": []any{
 			map[string]any{"type": "field", "inboundTag": []any{"api"}, "outboundTag": "api"},
@@ -140,16 +200,20 @@ func TestGetXrayConfigFlow_GatesOnSubnets(t *testing.T) {
 		},
 	})
 
-	subnets := collectVirtualnetSubnets(nil)
-	if len(subnets) != 0 {
+	if subnets := collectVirtualnetSubnets(nil); len(subnets) != 0 {
 		t.Fatalf("expected no subnets for nil inbounds, got %v", subnets)
 	}
+	if tags := collectVirtualnetInboundTags(nil); len(tags) != 0 {
+		t.Fatalf("expected no inbound tags for nil inbounds, got %v", tags)
+	}
 
-	// Caller (GetXrayConfig) gates on len(subnets) > 0, so under
-	// the contract injectVirtualnetAllowRule is NOT called and the
-	// router config stays byte-identical.
-	if string(router) == "" {
-		t.Fatal("router fixture is empty")
+	// Defence-in-depth: passing an empty tag slice directly to
+	// injectVirtualnetAllowRule must be a no-op. Without this, an
+	// upstream caller that forgets the gate could still emit an
+	// unscoped allow-rule.
+	out := injectVirtualnetAllowRule(router, []string{"10.0.0.0/24"}, nil)
+	if string(out) != string(router) {
+		t.Errorf("empty inboundTags must be a no-op; got mutation")
 	}
 }
 
@@ -160,8 +224,8 @@ func TestInjectVirtualnetAllowRule_Idempotent(t *testing.T) {
 		},
 	})
 
-	first := injectVirtualnetAllowRule(router, []string{"10.0.0.0/24"})
-	second := injectVirtualnetAllowRule(first, []string{"10.0.0.0/24"})
+	first := injectVirtualnetAllowRule(router, []string{"10.0.0.0/24"}, []string{"inbound-1"})
+	second := injectVirtualnetAllowRule(first, []string{"10.0.0.0/24"}, []string{"inbound-1"})
 
 	rulesFirst := mustRules(t, first)
 	rulesSecond := mustRules(t, second)
@@ -177,7 +241,7 @@ func TestInjectVirtualnetAllowRule_NoAPIRule(t *testing.T) {
 			map[string]any{"type": "field", "outboundTag": "blocked", "ip": []any{"geoip:private"}},
 		},
 	})
-	out := injectVirtualnetAllowRule(router, []string{"10.0.0.0/24"})
+	out := injectVirtualnetAllowRule(router, []string{"10.0.0.0/24"}, []string{"inbound-1"})
 	rules := mustRules(t, out)
 	if got, _ := rules[0]["outboundTag"].(string); got != virtualnetAllowOutboundTag {
 		t.Errorf("with no api rule, allow-rule must be at index 0: %v", rules[0])
@@ -185,14 +249,14 @@ func TestInjectVirtualnetAllowRule_NoAPIRule(t *testing.T) {
 }
 
 func TestInjectVirtualnetAllowRule_NoExistingBlocked(t *testing.T) {
-	// Operator removed the antipivot rule; allow-rule still injected
-	// per the unconditional contract.
+	// Operator removed the antipivot rule; allow-rule is still
+	// injected so virtualnet flows continue to reach the gateway.
 	router := mustMarshal(t, map[string]any{
 		"rules": []any{
 			map[string]any{"type": "field", "inboundTag": []any{"api"}, "outboundTag": "api"},
 		},
 	})
-	out := injectVirtualnetAllowRule(router, []string{"10.0.0.0/24"})
+	out := injectVirtualnetAllowRule(router, []string{"10.0.0.0/24"}, []string{"inbound-1"})
 	rules := mustRules(t, out)
 	if len(rules) != 2 {
 		t.Fatalf("expected 2 rules, got %d", len(rules))
@@ -204,12 +268,12 @@ func TestInjectVirtualnetAllowRule_NoExistingBlocked(t *testing.T) {
 
 func TestInjectVirtualnetAllowRule_EmptyAndMalformedSurviveUnchanged(t *testing.T) {
 	// Empty bytes -> returned as-is.
-	if got := injectVirtualnetAllowRule(nil, []string{"10.0.0.0/24"}); got != nil {
+	if got := injectVirtualnetAllowRule(nil, []string{"10.0.0.0/24"}, []string{"inbound-1"}); got != nil {
 		t.Errorf("nil input must round-trip as nil, got %s", string(got))
 	}
 	// Non-JSON -> returned as-is.
 	bad := []byte("{not json")
-	if got := injectVirtualnetAllowRule(bad, nil); string(got) != string(bad) {
+	if got := injectVirtualnetAllowRule(bad, nil, []string{"inbound-1"}); string(got) != string(bad) {
 		t.Errorf("malformed input must round-trip unchanged, got %s", string(got))
 	}
 }
