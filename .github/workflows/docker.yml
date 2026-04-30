@@ -57,6 +57,11 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64/v8,linux/arm/v7,linux/arm/v6,linux/386
+          # Mirrors release.yml: only the linux server architectures we
+          # actually ship for this fork. Drops linux/arm/v6 (legacy SBCs)
+          # and linux/386 (no 32-bit server use case), since multi-arch
+          # docker buildx runs serially on QEMU and trimming saves ~20 min
+          # per tag push.
+          platforms: linux/amd64,linux/arm64/v8,linux/arm/v7
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
