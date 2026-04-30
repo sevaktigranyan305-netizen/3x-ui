@@ -374,6 +374,25 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		xrayConfig.RouterConfig = expanded
 	}
 
+	// Inject the L3 virtualnet allow-rule (loopback + every active
+	// virtualnet subnet → direct, scoped via inboundTag to the
+	// virtualnet inbounds only) ahead of the default
+	// `geoip:private → blocked` antipivot rule so gateway-IP
+	// rewrites and intra-tunnel traffic are not silently sent to
+	// the blackhole. Gated on at least one virtualnet inbound being
+	// active so non-virtualnet deployments retain full antipivot
+	// protection, and inbound-tag-scoped so a server that hosts
+	// both virtualnet and classic CONNECT-style inbounds keeps
+	// loopback blocked for the latter — see virtualnet_routing.go
+	// for rationale.
+	subnets := collectVirtualnetSubnets(inbounds)
+	tags := collectVirtualnetInboundTags(inbounds)
+	if len(subnets) > 0 && len(tags) > 0 {
+		if injected := injectVirtualnetAllowRule(xrayConfig.RouterConfig, subnets, tags); len(injected) > 0 {
+			xrayConfig.RouterConfig = injected
+		}
+	}
+
 	return xrayConfig, nil
 }
 
