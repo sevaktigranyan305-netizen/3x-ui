@@ -291,6 +291,30 @@ func TestInjectVirtualnetAllowRule_EmptyAndMalformedSurviveUnchanged(t *testing.
 	}
 }
 
+func TestIPSetsEqual_DuplicatesOnOneSideAreNotEqual(t *testing.T) {
+	// Set semantics: a stored rule with duplicate entries that mask
+	// a missing element must NOT compare equal to the canonical
+	// deduplicated input. Without bidirectional dedup, a length-only
+	// guard would falsely report equality.
+	stored := []any{"127.0.0.0/8", "127.0.0.0/8"}
+	canonical := []any{"127.0.0.0/8", "10.0.0.0/24"}
+	if ipSetsEqual(stored, canonical) {
+		t.Errorf("duplicate-masked stored set must not equal canonical set")
+	}
+
+	// Equal sets, regardless of duplicates on the stored side.
+	storedDup := []any{"127.0.0.0/8", "127.0.0.0/8", "10.0.0.0/24"}
+	if !ipSetsEqual(storedDup, canonical) {
+		t.Errorf("set-equal inputs must compare equal regardless of stored duplicates")
+	}
+
+	// Unequal sets of equal length still rejected.
+	other := []any{"127.0.0.0/8", "192.168.0.0/16"}
+	if ipSetsEqual(other, canonical) {
+		t.Errorf("unequal sets of equal length must not compare equal")
+	}
+}
+
 // mustMarshal serialises v to JSON or fails the test. Helper kept
 // local to the routing tests so changes here do not collide with
 // other test files in the package.

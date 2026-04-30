@@ -286,9 +286,15 @@ func isAPIInboundRule(rule map[string]any) bool {
 // sides may be []any of strings (the JSON-decoded form). Order is
 // significant in xray rule files but not for our equality check
 // since the allow-rule is regenerated deterministically.
+//
+// Both sides are reduced to a deduplicated set before comparison so
+// duplicates on one side cannot mask a missing element on the other
+// — important because the function is used for idempotency checks
+// against operator-authored rules where duplicate IPs are legal,
+// even though our own callers always pass deduplicated input.
 func ipSetsEqual(a any, b []any) bool {
 	as, ok := a.([]any)
-	if !ok || len(as) != len(b) {
+	if !ok {
 		return false
 	}
 	am := map[string]struct{}{}
@@ -299,12 +305,19 @@ func ipSetsEqual(a any, b []any) bool {
 		}
 		am[s] = struct{}{}
 	}
+	bm := map[string]struct{}{}
 	for _, v := range b {
 		s, ok := v.(string)
 		if !ok {
 			return false
 		}
-		if _, hit := am[s]; !hit {
+		bm[s] = struct{}{}
+	}
+	if len(am) != len(bm) {
+		return false
+	}
+	for k := range bm {
+		if _, hit := am[k]; !hit {
 			return false
 		}
 	}
