@@ -21,6 +21,12 @@ class DBInbound {
         this.tag = "";
         this.sniffing = "";
         this.clientStats = ""
+        // ObjectUtil.cloneProps only copies properties that already exist on
+        // `this` — fields not pre-declared here are silently dropped from the
+        // API payload. Pre-declare virtualNetworkAssignments so the L3
+        // virtualnet IPAM map (uuid -> ip) survives into the JS model and
+        // the VLESS link generator can set &vnetIp= from it.
+        this.virtualNetworkAssignments = null;
         if (data == null) {
             return;
         }
