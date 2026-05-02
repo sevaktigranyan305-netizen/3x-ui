@@ -74,8 +74,13 @@ func (s *InboundService) GetAllInbounds() ([]*model.Inbound, error) {
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return nil, err
 	}
-	// Enrich client stats with UUID/SubId from inbound settings
+	// Enrich client stats with UUID/SubId from inbound settings; also
+	// annotate VirtualnetAssignments so WebSocket payloads carry the IPAM
+	// map (uuid -> ip) — without this the periodic xray-traffic broadcast
+	// overwrites the frontend's dbInbounds[] with vna-less objects and
+	// QR / More-Info links lose &vnetIp=.
 	for _, inbound := range inbounds {
+		AnnotateVirtualnetAssignments(inbound)
 		clients, _ := s.GetClients(inbound)
 		if len(clients) == 0 || len(inbound.ClientStats) == 0 {
 			continue
