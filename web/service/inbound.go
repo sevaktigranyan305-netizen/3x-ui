@@ -1516,6 +1516,15 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	if err != nil {
 		return err, false
 	}
+	// Back-fill missing per-device stat rows BEFORE addClientTraffic
+	// runs, otherwise traffics keyed on "<parent>-<device.Name>" would
+	// be silently dropped (Where("email IN ?") returns no rows for a
+	// device-row that was never created, so the Up/Down increment is
+	// thrown away). This is idempotent — rows that already exist are
+	// skipped, only missing ones are created with zero counters.
+	if err := s.ensureDeviceStatRows(tx); err != nil {
+		logger.Warning("Error ensuring device stat rows:", err)
+	}
 	err = s.addClientTraffic(tx, clientTraffics)
 	if err != nil {
 		return err, false
@@ -1557,6 +1566,61 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 		logger.Debugf("%v inbounds disabled", count)
 	}
 	return nil, (needRestart0 || needRestart1 || needRestart2 || needRestart3)
+}
+
+// ensureDeviceStatRows walks every inbound and inserts a zero-valued
+// client_traffics row for any "<parent>-<device.Name>" pair whose row
+// does not yet exist. This back-fills clients that pre-date the
+// devices feature OR whose AddInboundClient / UpdateInboundClient call
+// silently failed (AddClientStat ignores its return value in those
+// paths, so a unique-constraint or other DB error can drop the row
+// without surfacing). Without this back-fill, traffic reported by
+// xray for a missing device email is silently dropped by
+// addClientTraffic (it only updates rows it can SELECT) and the
+// parent's aggregated counter stays at zero — exactly the symptom of
+// "I burned 5 GB on my PC but the panel shows 0 B for the user".
+//
+// Idempotent: rows that already exist are detected via a COUNT and
+// skipped. Errors creating individual rows are logged but do not
+// abort the loop, so a single broken inbound config does not stall
+// stat collection for the rest.
+func (s *InboundService) ensureDeviceStatRows(tx *gorm.DB) error {
+	var inbounds []*model.Inbound
+	if err := tx.Find(&inbounds).Error; err != nil {
+		return err
+	}
+	for _, ib := range inbounds {
+		clients, err := s.GetClients(ib)
+		if err != nil {
+			continue
+		}
+		for _, c := range clients {
+			if len(c.Devices) == 0 {
+				continue
+			}
+			for _, entry := range expandClientForXray(c) {
+				if entry.Email == "" {
+					continue
+				}
+				var count int64
+				if err := tx.Model(&xray.ClientTraffic{}).
+					Where("email = ?", entry.Email).
+					Count(&count).Error; err != nil {
+					continue
+				}
+				if count > 0 {
+					continue
+				}
+				if err := s.AddClientStat(tx, ib.Id, &entry); err != nil {
+					logger.Warningf(
+						"ensureDeviceStatRows: AddClientStat(%q, inbound=%d) failed: %v",
+						entry.Email, ib.Id, err,
+					)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // aggregateClientDeviceTraffic walks every inbound, finds clients with a
